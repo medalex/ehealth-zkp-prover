@@ -359,7 +359,7 @@ INPUT =
   "currentTimestamp": "1030",
 
   "workflowId": "77",
-  "nonce": "TODO: recompute as Poseidon(1)(77)"
+  "nonce": "16152684868568442401666846871608755126840480611758405973640742775547002005522"
 }
 
 
