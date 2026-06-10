@@ -1,0 +1,20 @@
+FROM node:20-slim
+
+RUN apt-get update && apt-get install -y curl ca-certificates --no-install-recommends \
+    && curl -L https://github.com/iden3/circom/releases/download/v2.1.6/circom-linux-amd64 \
+       -o /usr/local/bin/circom \
+    && chmod +x /usr/local/bin/circom \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g snarkjs@0.7.6
+
+WORKDIR /work
+
+# Install circomlib so that -l node_modules resolves poseidon.circom
+RUN npm install circomlib@2.0.5
+
+COPY scripts/setup.sh scripts/setup.sh
+RUN chmod +x scripts/setup.sh
+
+# circuits/ is mounted at runtime: -v <host>/circuits:/work/circuits
+CMD ["bash", "scripts/setup.sh"]

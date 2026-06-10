@@ -10,8 +10,8 @@ WORKDIR /app
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/package.json .
-# Circuit artifacts (prescription_validation_poseidon_merkle.wasm, circuit_final.zkey,
-# verification_key.json) must be placed here before building or mounted as a volume.
-RUN mkdir -p circuits
+COPY --from=build /app/circuits/prescription_validation_poseidon_merkle.wasm ./circuits/
+COPY --from=build /app/circuits/circuit_final.zkey ./circuits/
+COPY --from=build /app/circuits/verification_key.json ./circuits/
 EXPOSE 3005
 CMD ["node", "dist/main"]

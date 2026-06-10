@@ -1,0 +1,7 @@
+node_modules/
+dist/
+circuits/pot*.ptau
+circuits/*.r1cs
+circuits/*.sym
+circuits/prescription_validation_poseidon_merkle_js/
+Dockerfile.setup
