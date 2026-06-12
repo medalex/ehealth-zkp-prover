@@ -13,7 +13,7 @@ const N_PRESC = 1;
 const MERKLE_DEPTH = 3;
 
 // Маппинг аллергена → 0-based индекс в N_DRUGS.
-// approvedDrugIds = [1, 2]: j=0 → Metformin (drugId 1), j=1 → Penicillin (drugId 2)
+// approvedDrugIds = [105, 103]: j=0 → Metformin (drugId 105), j=1 → Penicillin (drugId 103)
 const SUBSTANCE_IDX: Record<string, number> = {
   'Metformin': 0, 'metformin': 0,
   'Penicillin': 1, 'penicillin': 1,
@@ -120,7 +120,8 @@ export class ProverService implements OnModuleInit {
   // Трансформирует высокоуровневый запрос hospital-api в circuit-level inputs
   private buildHighLevelInput(req: HighLevelRequest, nonce: string): Record<string, unknown> {
     const allergies = req.allergies ?? [];
-    const approvedDrugIds = ['1', '2'];
+    // drugId 105 = Metformin (индекс 0), drugId 103 = Penicillin (индекс 1)
+    const approvedDrugIds = ['105', '103'];
 
     // Детерминированный хеш UAL врача
     const doctorCredentialHash = this.stringToField(req.doctorCredentialUal ?? '');
