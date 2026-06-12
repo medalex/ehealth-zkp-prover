@@ -63,7 +63,6 @@ template LessEqThan(n) {
     out <== lt.out;
 }
 
-
 template PoseidonHash2() {
     signal input left;
     signal input right;
@@ -148,80 +147,117 @@ template PoseidonMerkleProof(depth) {
     valid <== eq.out;
 }
 
-template PrescriptionValidation(N_DRUGS, N_ALLERGIES, N_PRESC, BITLEN, MERKLE_DEPTH) {
-    signal input doctorCredentialHash;
-    signal input prescribedDrugIds[N_PRESC];
-    signal input prescribedDosages[N_PRESC];
+// Главный шаблон.
+// N_DRUGS     — количество разрешённых препаратов.
+// N_max       — максимальное число референсных слотов (записей пациента),
+//               каждый со своим Merkle-доказательством против root_M.
+//               Определяет сложность по формуле n_total ≈ n_cred + N_max·n_Merkle + |Pol|·n_range.
+// N_PRESC     — число предписаний в одном доказательстве.
+// BITLEN      — битовая ширина для range-check.
+// MERKLE_DEPTH — глубина дерева Меркле.
+template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH) {
 
-    signal input validCredentialRoot;
+    // ── Приватные входы ─────────────────────────────────────────────────────────
+
+    // Учётные данные врача
+    signal input doctorCredentialHash;
     signal input credentialSiblings[MERKLE_DEPTH];
     signal input credentialPathBits[MERKLE_DEPTH];
 
-    signal input approvedDrugIds[N_DRUGS];
+    // Данные рецепта
+    signal input prescribedDrugIds[N_PRESC];
+    signal input prescribedDosages[N_PRESC];
     signal input childMaxDosages[N_DRUGS];
-    signal input adultMaxDosages[N_DRUGS];
-    signal input allergyMatrix[N_ALLERGIES][N_DRUGS];
 
     signal input patientAge;
     signal input prescriptionTimestamp;
     signal input validFor;
     signal input currentTimestamp;
-
     signal input workflowId;
-    signal input nonce;
 
+    // N_max референсных слотов записей пациента (аллергии и пр.)
+    // refLeaf[i]     = Poseidon(recordId, recordType, substanceId, ...)
+    // refIsActive[i] = 1 для активного слота, 0 для паддинга
+    // Неактивные слоты проходят все проверки тавтологически.
+    signal input refLeaf[N_max];
+    signal input refSiblings[N_max][MERKLE_DEPTH];
+    signal input refPathBits[N_max][MERKLE_DEPTH];
+    signal input refIsActive[N_max];
+
+    // ── Публичные входы ─────────────────────────────────────────────────────────
+
+    // root_M — корень реестра записей (включает учётные данные врача и записи пациента)
+    signal input validCredentialRoot;
+    signal input nonce;
+    signal input approvedDrugIds[N_DRUGS];
+    signal input adultMaxDosages[N_DRUGS];
+    // allergyMatrix[i][j] = 1 если аллерген из слота i противопоказан с препаратом j
+    signal input allergyMatrix[N_max][N_DRUGS];
+
+    // ── Выходы ──────────────────────────────────────────────────────────────────
     signal output outcome;
     signal output stmtHash;
 
+    // ── Политика 1: CredValid — врач в реестре ──────────────────────────────────
     signal policy1;
-    signal policy2;
-    signal policy3;
-    signal policy4;
-    signal policy5;
 
-    component allergyBool[N_ALLERGIES][N_DRUGS];
-    component credProof;
-    component ageIsChild;
+    component credProof = PoseidonMerkleProof(MERKLE_DEPTH);
+    credProof.leaf       <== doctorCredentialHash;
+    credProof.expectedRoot <== validCredentialRoot;
+    for (var d = 0; d < MERKLE_DEPTH; d++) {
+        credProof.siblings[d]  <== credentialSiblings[d];
+        credProof.pathBits[d]  <== credentialPathBits[d];
+    }
+    policy1 <== credProof.valid;
 
-    component childSel[N_PRESC];
-    component adultSel[N_PRESC];
-    component rowSel[N_PRESC][N_ALLERGIES];
-    component allNoConflict[N_PRESC];
-    component leChild[N_PRESC];
-    component leAdult[N_PRESC];
+    // ── Merkle-доказательства для N_max референсных слотов ──────────────────────
+    // Активный слот (refIsActive=1) обязан иметь валидное доказательство против root_M.
+    // Неактивный слот (refIsActive=0) — без ограничений на доказательство.
+    component refProof[N_max];
+    component refActiveBool[N_max];
+    component allergyBool[N_max][N_DRUGS];
+    signal activeAndValid[N_max];
 
-    signal noConflictRow[N_PRESC][N_ALLERGIES];
-    signal noAllergyPerRx[N_PRESC];
-    signal dosageOkPerRx[N_PRESC];
+    for (var i = 0; i < N_max; i++) {
+        refActiveBool[i] = ForceBool();
+        refActiveBool[i].in <== refIsActive[i];
 
-    component allP2;
-    component allP3;
-    component timeLe;
-    component wfHash;
-    component nonceEq;
+        refProof[i] = PoseidonMerkleProof(MERKLE_DEPTH);
+        refProof[i].leaf         <== refLeaf[i];
+        refProof[i].expectedRoot <== validCredentialRoot;
+        for (var d = 0; d < MERKLE_DEPTH; d++) {
+            refProof[i].siblings[d] <== refSiblings[i][d];
+            refProof[i].pathBits[d] <== refPathBits[i][d];
+        }
 
-    component finalAnd;
-    component stmtHasher;
+        // refIsActive[i] === refIsActive[i] * refProof[i].valid
+        // ⟹ при refIsActive=1 требуем valid=1; при refIsActive=0 — без ограничений.
+        activeAndValid[i] <== refIsActive[i] * refProof[i].valid;
+        refIsActive[i] === activeAndValid[i];
 
-    for (var a = 0; a < N_ALLERGIES; a++) {
-        for (var i = 0; i < N_DRUGS; i++) {
-            allergyBool[a][i] = ForceBool();
-            allergyBool[a][i].in <== allergyMatrix[a][i];
+        for (var j = 0; j < N_DRUGS; j++) {
+            allergyBool[i][j] = ForceBool();
+            allergyBool[i][j].in <== allergyMatrix[i][j];
         }
     }
 
-    // Policy 1: doctor credential hash belongs to the valid credential Merkle root.
-    credProof = PoseidonMerkleProof(MERKLE_DEPTH);
-    credProof.leaf <== doctorCredentialHash;
-    credProof.expectedRoot <== validCredentialRoot;
-    for (var d = 0; d < MERKLE_DEPTH; d++) {
-        credProof.siblings[d] <== credentialSiblings[d];
-        credProof.pathBits[d] <== credentialPathBits[d];
-    }
-    policy1 <== credProof.valid;
-    //computedCredentialRoot <== credProof.computedRoot;
+    // ── Политика 2: NoContraindication — нет аллергии на выписанный препарат ────
+    signal policy2;
+    component rowSel[N_PRESC][N_max];
+    signal activeAllergyConflict[N_PRESC][N_max];
+    signal noConflictRow[N_PRESC][N_max];
+    signal noAllergyPerRx[N_PRESC];
+    component allNoConflict[N_PRESC];
 
-    ageIsChild = LessThan(BITLEN);
+    // ── Политика 3: DosageOk — дозировка в допустимых пределах ─────────────────
+    signal policy3;
+    component childSel[N_PRESC];
+    component adultSel[N_PRESC];
+    component leChild[N_PRESC];
+    component leAdult[N_PRESC];
+    signal dosageOkPerRx[N_PRESC];
+
+    component ageIsChild = LessThan(BITLEN);
     ageIsChild.a <== patientAge;
     ageIsChild.b <== 11;
 
@@ -233,27 +269,28 @@ template PrescriptionValidation(N_DRUGS, N_ALLERGIES, N_PRESC, BITLEN, MERKLE_DE
         adultSel[p].key <== prescribedDrugIds[p];
 
         for (var i1 = 0; i1 < N_DRUGS; i1++) {
-            childSel[p].keys[i1] <== approvedDrugIds[i1];
+            childSel[p].keys[i1]   <== approvedDrugIds[i1];
             childSel[p].values[i1] <== childMaxDosages[i1];
-
-            adultSel[p].keys[i1] <== approvedDrugIds[i1];
+            adultSel[p].keys[i1]   <== approvedDrugIds[i1];
             adultSel[p].values[i1] <== adultMaxDosages[i1];
         }
 
-        for (var a2 = 0; a2 < N_ALLERGIES; a2++) {
-            rowSel[p][a2] = SelectValue(N_DRUGS);
-            rowSel[p][a2].key <== prescribedDrugIds[p];
-
-            for (var i2 = 0; i2 < N_DRUGS; i2++) {
-                rowSel[p][a2].keys[i2] <== approvedDrugIds[i2];
-                rowSel[p][a2].values[i2] <== allergyMatrix[a2][i2];
+        for (var i2 = 0; i2 < N_max; i2++) {
+            rowSel[p][i2] = SelectValue(N_DRUGS);
+            rowSel[p][i2].key <== prescribedDrugIds[p];
+            for (var j2 = 0; j2 < N_DRUGS; j2++) {
+                rowSel[p][i2].keys[j2]   <== approvedDrugIds[j2];
+                rowSel[p][i2].values[j2] <== allergyMatrix[i2][j2];
             }
-            noConflictRow[p][a2] <== 1 - rowSel[p][a2].selected;
+            // Для активного слота: учитываем запись аллергии.
+            // Для неактивного (паддинг): конфликта нет тавтологически.
+            activeAllergyConflict[p][i2] <== refIsActive[i2] * rowSel[p][i2].selected;
+            noConflictRow[p][i2] <== 1 - activeAllergyConflict[p][i2];
         }
 
-        allNoConflict[p] = AndN(N_ALLERGIES);
-        for (var a3 = 0; a3 < N_ALLERGIES; a3++) {
-            allNoConflict[p].in[a3] <== noConflictRow[p][a3];
+        allNoConflict[p] = AndN(N_max);
+        for (var i3 = 0; i3 < N_max; i3++) {
+            allNoConflict[p].in[i3] <== noConflictRow[p][i3];
         }
         noAllergyPerRx[p] <== allNoConflict[p].out;
 
@@ -269,8 +306,8 @@ template PrescriptionValidation(N_DRUGS, N_ALLERGIES, N_PRESC, BITLEN, MERKLE_DE
         dosageOkPerRx[p] <== leAdult[p].out + ageIsChild.out * (leChild[p].out - leAdult[p].out);
     }
 
-    allP2 = AndN(N_PRESC);
-    allP3 = AndN(N_PRESC);
+    component allP2 = AndN(N_PRESC);
+    component allP3 = AndN(N_PRESC);
     for (var p2 = 0; p2 < N_PRESC; p2++) {
         allP2.in[p2] <== noAllergyPerRx[p2];
         allP3.in[p2] <== dosageOkPerRx[p2];
@@ -278,20 +315,25 @@ template PrescriptionValidation(N_DRUGS, N_ALLERGIES, N_PRESC, BITLEN, MERKLE_DE
     policy2 <== allP2.out;
     policy3 <== allP3.out;
 
-    timeLe = LessEqThan(BITLEN);
+    // ── Политика 4: TimeValid — рецепт действителен ─────────────────────────────
+    signal policy4;
+    component timeLe = LessEqThan(BITLEN);
     timeLe.a <== currentTimestamp;
     timeLe.b <== prescriptionTimestamp + validFor;
     policy4 <== timeLe.out;
 
-    wfHash = Poseidon(1);
+    // ── Политика 5: NonceBind — нонс привязан к workflowId ──────────────────────
+    signal policy5;
+    component wfHash = Poseidon(1);
     wfHash.inputs[0] <== workflowId;
 
-    nonceEq = IsEqual();
+    component nonceEq = IsEqual();
     nonceEq.a <== wfHash.out;
     nonceEq.b <== nonce;
     policy5 <== nonceEq.out;
 
-    finalAnd = AndN(5);
+    // ── Финальный AND(P1..P5) ────────────────────────────────────────────────────
+    component finalAnd = AndN(5);
     finalAnd.in[0] <== policy1;
     finalAnd.in[1] <== policy2;
     finalAnd.in[2] <== policy3;
@@ -299,7 +341,8 @@ template PrescriptionValidation(N_DRUGS, N_ALLERGIES, N_PRESC, BITLEN, MERKLE_DE
     finalAnd.in[4] <== policy5;
     outcome <== finalAnd.out;
 
-    stmtHasher = Poseidon(2 * N_PRESC + 2);
+    // ── stmtHash = Poseidon(dCH, nonce, drugIds..., dosages...) ─────────────────
+    component stmtHasher = Poseidon(2 * N_PRESC + 2);
     stmtHasher.inputs[0] <== doctorCredentialHash;
     stmtHasher.inputs[1] <== nonce;
     for (var k = 0; k < N_PRESC; k++) {
@@ -309,11 +352,12 @@ template PrescriptionValidation(N_DRUGS, N_ALLERGIES, N_PRESC, BITLEN, MERKLE_DE
     stmtHash <== stmtHasher.out;
 }
 
-// Public inputs allow the on-chain verifier to bind the proof to:
-// - the governance-approved credential registry (validCredentialRoot)
-// - the governance-approved theory T parameters (approvedDrugIds, allergyMatrix, adultMaxDosages)
-// - the specific prescription instance (stmtHash, nonce)
-// stmtHash and prescriptionValid are signal outputs and are always public.
+// Публичные входы: верификатор on-chain привязывает доказательство к:
+//   - реестру учётных данных (validCredentialRoot = root_M)
+//   - параметрам политики T (approvedDrugIds, allergyMatrix, adultMaxDosages)
+//   - конкретному экземпляру рецепта (stmtHash, nonce)
+// stmtHash и outcome — выходы схемы, всегда публичны.
+// Размер allergyMatrix: N_max × N_DRUGS = 3×2 = 6 публичных сигналов.
 component main {public [
     doctorCredentialHash,
     validCredentialRoot,
@@ -321,46 +365,4 @@ component main {public [
     approvedDrugIds,
     allergyMatrix,
     adultMaxDosages
-]} = PrescriptionValidation(4, 3, 2, 16, 3);
-
-
-/*
-INPUT =
-{
-  "doctorCredentialHash": "555",
-  "prescribedDrugIds": ["101", "104"],
-  "prescribedDosages": ["8", "2"],
-
-  "validCredentialRoot": "12637775194496995754117307235330377055135569056804320597148279303980524724247",
-  "credentialSiblings": [
-    "666",
-    "8729492946723542771608110226099589081116106357422917950961108651628306410978",
-    "2627613426887678919670906595223549159912332087418882198813349531614684120136"
-  ],
-  "credentialPathBits": [
-    "0",
-    "0",
-    "1"
-  ],
-
-  "approvedDrugIds": ["101", "102", "103", "104"],
-  "childMaxDosages": ["10", "5", "8", "2"],
-  "adultMaxDosages": ["20", "10", "16", "4"],
-
-  "allergyMatrix": [
-    ["0", "0", "1", "0"],
-    ["0", "0", "0", "0"],
-    ["0", "0", "0", "0"]
-  ],
-
-  "patientAge": "12",
-  "prescriptionTimestamp": "1000",
-  "validFor": "50",
-  "currentTimestamp": "1030",
-
-  "workflowId": "77",
-  "nonce": "TODO: recompute as Poseidon(1)(77)"
-}
-
-
-*/
+]} = PrescriptionValidation(2, 3, 1, 16, 3);

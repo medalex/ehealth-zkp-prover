@@ -5,24 +5,25 @@ import { buildPoseidon } from 'circomlibjs';
 import { ProveRequestDto } from './dto/prove-request.dto';
 import { VerifyRequestDto } from './dto/verify-request.dto';
 
-// Circuit fixed dimensions — must match the compiled prescription_validation_poseidon_merkle.circom
-const N_DRUGS = 4;
-const N_ALLERGIES = 3;
-const N_PRESC = 2;
+// Фиксированные размеры схемы — должны совпадать со скомпилированным circom-файлом.
+const N_DRUGS = 2;
+const N_max = 3;   // число референсных слотов; определяет сложность n_total ≈ n_cred + N_max·n_Merkle + |Pol|·n_range
+const N_PRESC = 1;
 const MERKLE_DEPTH = 3;
 
-// Public signal indices in the snarkjs output array:
-// outputs come first (outcome, stmtHash), then public inputs in declaration order
+// Индексы публичных сигналов в массиве snarkjs (выходы идут первыми, затем публичные входы):
+// outcome(0), stmtHash(1), doctorCredentialHash(2), validCredentialRoot(3), nonce(4),
+// approvedDrugIds[2] → 5-6, allergyMatrix[N_max×N_DRUGS=6] → 7-12, adultMaxDosages[2] → 13-14
 export const PUB = {
   outcome: 0,
   stmtHash: 1,
   doctorCredentialHash: 2,
   validCredentialRoot: 3,
   nonce: 4,
-  approvedDrugIds: [5, 6, 7, 8],
-  // allergyMatrix rows 0-2, cols 0-3 in row-major order: indices 9..20
-  allergyMatrixStart: 9,
-  adultMaxDosages: [21, 22, 23, 24],
+  approvedDrugIds: [5, 6],
+  // allergyMatrix строки 0-2, столбцы 0-1 в row-major порядке: индексы 7..12
+  allergyMatrixStart: 7,
+  adultMaxDosages: [13, 14],
 } as const;
 
 @Injectable()
@@ -68,14 +69,17 @@ export class ProverService implements OnModuleInit {
 
   private buildInput(dto: ProveRequestDto, nonce: string): Record<string, unknown> {
     return {
-      // Public inputs
+      // Публичные входы
       doctorCredentialHash: dto.doctorCredentialHash,
       validCredentialRoot: dto.validCredentialRoot,
       nonce,
       approvedDrugIds: dto.approvedDrugIds,
       allergyMatrix: dto.allergyMatrix.map(row => row.map(String)),
       adultMaxDosages: dto.adultMaxDosages,
-      // Private inputs
+      // Приватные входы — учётные данные врача
+      credentialSiblings: dto.credentialSiblings,
+      credentialPathBits: dto.credentialPathBits.map(String),
+      // Приватные входы — рецепт и пациент
       prescribedDrugIds: dto.prescribedDrugIds,
       prescribedDosages: dto.prescribedDosages,
       patientAge: String(dto.patientAge),
@@ -83,9 +87,12 @@ export class ProverService implements OnModuleInit {
       validFor: String(dto.validFor),
       currentTimestamp: String(dto.currentTimestamp),
       workflowId: String(dto.workflowId),
-      credentialSiblings: dto.credentialSiblings,
-      credentialPathBits: dto.credentialPathBits.map(String),
       childMaxDosages: dto.childMaxDosages,
+      // Приватные входы — N_max референсных слотов (аллергии и записи пациента)
+      refLeaf: dto.refLeaf,
+      refSiblings: dto.refSiblings.map(row => row.map(String)),
+      refPathBits: dto.refPathBits.map(row => row.map(String)),
+      refIsActive: dto.refIsActive.map(String),
     };
   }
 
@@ -127,5 +134,5 @@ export class ProverService implements OnModuleInit {
   }
 }
 
-// Exported for use in hospital-api and pharmacy-api when parsing publicSignals
-export { N_DRUGS, N_ALLERGIES, N_PRESC, MERKLE_DEPTH };
+// Экспорт для hospital-api и pharmacy-api при разборе publicSignals
+export { N_DRUGS, N_max, N_PRESC, MERKLE_DEPTH };
