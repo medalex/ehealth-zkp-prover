@@ -357,7 +357,7 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH) {
 //   - параметрам политики T (approvedDrugIds, allergyMatrix, adultMaxDosages)
 //   - конкретному экземпляру рецепта (stmtHash, nonce)
 // stmtHash и outcome — выходы схемы, всегда публичны.
-// Размер allergyMatrix: N_max × N_DRUGS = 3×2 = 6 публичных сигналов.
+// Размер allergyMatrix: N_max × N_DRUGS = 3×3 = 9 публичных сигналов.
 component main {public [
     doctorCredentialHash,
     validCredentialRoot,
@@ -365,4 +365,4 @@ component main {public [
     approvedDrugIds,
     allergyMatrix,
     adultMaxDosages
-]} = PrescriptionValidation(2, 3, 1, 16, 3);
+]} = PrescriptionValidation(3, 3, 1, 16, 3);

@@ -7,30 +7,42 @@ import { ProveRequestDto } from './dto/prove-request.dto';
 import { VerifyRequestDto } from './dto/verify-request.dto';
 
 // Размеры схемы — должны совпадать со скомпилированным circom-файлом.
-const N_DRUGS = 2;
+const N_DRUGS = 3;
 const N_max = 3;   // число референсных слотов; n_total ≈ n_cred + N_max·n_Merkle + |Pol|·n_range
 const N_PRESC = 1;
 const MERKLE_DEPTH = 3;
 
 // Маппинг аллергена → 0-based индекс в N_DRUGS.
-// approvedDrugIds = [105, 103]: j=0 → Metformin (drugId 105), j=1 → Penicillin (drugId 103)
+// approvedDrugIds = [105, 103, 107]:
+//   j=0 → Metformin (drugId 105)
+//   j=1 → Penicillin (drugId 103)
+//   j=2 → Amoxicillin (drugId 107)
 const SUBSTANCE_IDX: Record<string, number> = {
-  'Metformin': 0, 'metformin': 0,
-  'Penicillin': 1, 'penicillin': 1,
+  'Metformin':   0, 'metformin':   0,
+  'Penicillin':  1, 'penicillin':  1,
+  'Amoxicillin': 2, 'amoxicillin': 2,
+};
+
+// Субсумпция β-лактамного класса: аллергия на Penicillin блокирует и Amoxicillin.
+// allergyMatrix[slot][j]=1 для каждого j из этого множества.
+const ALLERGY_BLOCKS: Record<number, number[]> = {
+  1: [1, 2],  // Penicillin (idx=1) ⊑ β-lactam → блокирует Penicillin + Amoxicillin
+  2: [1, 2],  // Amoxicillin (idx=2) ⊑ β-lactam → блокирует тот же класс
+  0: [0],     // Metformin — отдельный класс (biguanide)
 };
 
 // Индексы публичных сигналов в массиве snarkjs (выходы первые, затем публичные входы):
 // outcome(0), stmtHash(1), doctorCredentialHash(2), validCredentialRoot(3), nonce(4),
-// approvedDrugIds[2] → 5-6, allergyMatrix[N_max×N_DRUGS=6] → 7-12, adultMaxDosages[2] → 13-14
+// approvedDrugIds[3] → 5-7, allergyMatrix[N_max×N_DRUGS=9] → 8-16, adultMaxDosages[3] → 17-19
 export const PUB = {
   outcome: 0,
   stmtHash: 1,
   doctorCredentialHash: 2,
   validCredentialRoot: 3,
   nonce: 4,
-  approvedDrugIds: [5, 6],
-  allergyMatrixStart: 7,
-  adultMaxDosages: [13, 14],
+  approvedDrugIds: [5, 6, 7],
+  allergyMatrixStart: 8,
+  adultMaxDosages: [17, 18, 19],
 } as const;
 
 // Высокоуровневый запрос от hospital-api (ASP.NET Core сериализует в camelCase)
@@ -120,8 +132,8 @@ export class ProverService implements OnModuleInit {
   // Трансформирует высокоуровневый запрос hospital-api в circuit-level inputs
   private buildHighLevelInput(req: HighLevelRequest, nonce: string): Record<string, unknown> {
     const allergies = req.allergies ?? [];
-    // drugId 105 = Metformin (индекс 0), drugId 103 = Penicillin (индекс 1)
-    const approvedDrugIds = ['105', '103'];
+    // drugId 105 = Metformin (idx 0), drugId 103 = Penicillin (idx 1), drugId 107 = Amoxicillin (idx 2)
+    const approvedDrugIds = ['105', '103', '107'];
 
     // Детерминированный хеш UAL врача
     const doctorCredentialHash = this.stringToField(req.doctorCredentialUal ?? '');
@@ -138,8 +150,10 @@ export class ProverService implements OnModuleInit {
           ? this.poseidonHash([BigInt(substIdx + 1)])
           : this.stringToField(allergies[i]);
         refLeafValues.push(leafVal);
+        // Субсумпция: каждый аллерген блокирует весь β-лактамный класс (или только себя)
         const row = new Array(N_DRUGS).fill(0);
-        if (substIdx >= 0) row[substIdx] = 1;
+        const blocked = substIdx >= 0 ? (ALLERGY_BLOCKS[substIdx] ?? [substIdx]) : [];
+        for (const j of blocked) row[j] = 1;
         allergyMatrix.push(row);
       } else {
         // Паддинг: неактивный слот
@@ -173,7 +187,10 @@ export class ProverService implements OnModuleInit {
     const childMax = new Array(N_DRUGS).fill('65535');
     for (const p of req.policies ?? []) {
       const code = (p.medicationCode ?? '').toLowerCase();
-      const dIdx = code.includes('metformin') ? 0 : code.includes('penicillin') ? 1 : -1;
+      const dIdx = code.includes('metformin') ? 0
+                 : code.includes('penicillin') ? 1
+                 : code.includes('amoxicillin') ? 2
+                 : -1;
       if (dIdx < 0) continue;
       const thresh = Math.min(Math.floor(Number(p.threshold)), 65535).toString();
       const cond = (p.clinicalCondition ?? '').toLowerCase();
@@ -298,3 +315,4 @@ export class ProverService implements OnModuleInit {
 
 // Экспорт для hospital-api и pharmacy-api при разборе publicSignals
 export { N_DRUGS, N_max, N_PRESC, MERKLE_DEPTH };
+// Амоксициллин (drugId 107, idx 2) блокируется аллергией на Пенициллин через β-лактамную субсумпцию
