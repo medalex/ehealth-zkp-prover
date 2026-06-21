@@ -1,36 +1,36 @@
 export class ProveRequestDto {
-  // Идентификатор workflow — nonce = Poseidon([workflowId]) вычисляется в схеме
+  // Workflow identifier — nonce = Poseidon([workflowId]) is computed inside the circuit
   workflowId: number;
 
-  // Merkle-доказательство для учётной записи врача (вычисляется один раз при регистрации)
-  doctorCredentialHash: string;   // H(credential) как элемент поля
-  validCredentialRoot: string;    // root_M — корень реестра (включает врача и записи пациента)
-  credentialSiblings: string[];   // MERKLE_DEPTH хешей-соседей
-  credentialPathBits: number[];   // MERKLE_DEPTH битов направления (0=левый, 1=правый)
+  // Merkle proof for the physician credential (computed once at registration)
+  doctorCredentialHash: string;   // H(credential) as a field element
+  validCredentialRoot: string;    // root_M — registry root (covers physician + patient records)
+  credentialSiblings: string[];   // MERKLE_DEPTH sibling hashes
+  credentialPathBits: number[];   // MERKLE_DEPTH direction bits (0=left, 1=right)
 
-  // Данные рецепта
-  prescribedDrugIds: string[];    // N_PRESC идентификаторов препаратов
-  prescribedDosages: string[];    // N_PRESC значений дозировки
+  // Prescription data
+  prescribedDrugIds: string[];    // N_PRESC drug identifiers
+  prescribedDosages: string[];    // N_PRESC dosage values
 
-  // Параметры политики T из DKG (governance-approved)
-  approvedDrugIds: string[];      // N_DRUGS разрешённых идентификаторов препаратов
-  allergyMatrix: number[][];      // N_max × N_DRUGS: allergyMatrix[i][j]=1 если слот i противопоказан с препаратом j
-  adultMaxDosages: string[];      // N_DRUGS максимальных дозировок для взрослых (возраст >= 11)
-  childMaxDosages: string[];      // N_DRUGS максимальных дозировок для детей (возраст < 11)
+  // Policy parameters T from DKG (governance-approved)
+  approvedDrugIds: string[];      // N_DRUGS approved drug identifiers
+  allergyMatrix: number[][];      // N_max × N_DRUGS: allergyMatrix[i][j]=1 if slot i contraindicates drug j
+  adultMaxDosages: string[];      // N_DRUGS max dosages for adults (age >= 11)
+  childMaxDosages: string[];      // N_DRUGS max dosages for children (age < 11)
 
-  // Атрибуты пациента
+  // Patient attributes
   patientAge: number;
 
-  // Временные метки в секундах Unix
+  // Unix timestamps in seconds
   prescriptionTimestamp: number;
-  validFor: number;               // Окно действия рецепта в секундах
+  validFor: number;               // Prescription validity window in seconds
   currentTimestamp: number;
 
-  // N_max референсных слотов записей пациента (аллергии, лабораторные результаты)
-  // refLeaf[i]      = Poseidon(recordId, recordType, substanceId, ...) — листовой хеш
-  // refSiblings[i]  = MERKLE_DEPTH хешей-соседей для слота i
-  // refPathBits[i]  = MERKLE_DEPTH битов пути для слота i (0=левый, 1=правый)
-  // refIsActive[i]  = 1 для активного слота, 0 для паддинга
+  // N_max patient record reference slots (allergies, lab results)
+  // refLeaf[i]      = Poseidon(recordId, recordType, substanceId, ...) — leaf hash
+  // refSiblings[i]  = MERKLE_DEPTH sibling hashes for slot i
+  // refPathBits[i]  = MERKLE_DEPTH path bits for slot i (0=left, 1=right)
+  // refIsActive[i]  = 1 for an active slot, 0 for padding
   refLeaf: string[];
   refSiblings: string[][];
   refPathBits: number[][];

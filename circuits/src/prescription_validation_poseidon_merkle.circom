@@ -147,24 +147,24 @@ template PoseidonMerkleProof(depth) {
     valid <== eq.out;
 }
 
-// Главный шаблон.
-// N_DRUGS     — количество разрешённых препаратов.
-// N_max       — максимальное число референсных слотов (записей пациента),
-//               каждый со своим Merkle-доказательством против root_M.
-//               Определяет сложность по формуле n_total ≈ n_cred + N_max·n_Merkle + |Pol|·n_range.
-// N_PRESC     — число предписаний в одном доказательстве.
-// BITLEN      — битовая ширина для range-check.
-// MERKLE_DEPTH — глубина дерева Меркле.
+// Main template.
+// N_DRUGS      — number of approved drugs.
+// N_max        — max number of patient record reference slots, each with its own
+//                Merkle proof against root_M.
+//                Circuit size: n_total ≈ n_cred + N_max·n_Merkle + |Pol|·n_range.
+// N_PRESC      — number of prescriptions per proof.
+// BITLEN       — bit width for range checks.
+// MERKLE_DEPTH — Merkle tree depth.
 template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH) {
 
-    // ── Приватные входы ─────────────────────────────────────────────────────────
+    // ── Private inputs ──────────────────────────────────────────────────────────
 
-    // Учётные данные врача
+    // Physician credential
     signal input doctorCredentialHash;
     signal input credentialSiblings[MERKLE_DEPTH];
     signal input credentialPathBits[MERKLE_DEPTH];
 
-    // Данные рецепта
+    // Prescription data
     signal input prescribedDrugIds[N_PRESC];
     signal input prescribedDosages[N_PRESC];
     signal input childMaxDosages[N_DRUGS];
@@ -175,32 +175,32 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH) {
     signal input currentTimestamp;
     signal input workflowId;
 
-    // N_max референсных слотов записей пациента (аллергии и пр.)
+    // N_max patient record reference slots (allergies etc.)
     // refLeaf[i]     = Poseidon(recordId, recordType, substanceId, ...)
-    // refIsActive[i] = 1 для активного слота, 0 для паддинга
-    // Неактивные слоты проходят все проверки тавтологически.
+    // refIsActive[i] = 1 for an active slot, 0 for padding
+    // Inactive slots pass all checks tautologically.
     signal input refLeaf[N_max];
     signal input refSiblings[N_max][MERKLE_DEPTH];
     signal input refPathBits[N_max][MERKLE_DEPTH];
     signal input refIsActive[N_max];
 
-    // ── Публичные входы ─────────────────────────────────────────────────────────
+    // ── Public inputs ───────────────────────────────────────────────────────────
 
-    // validCredentialRoot — корень реестра врачей (МФССИА → DKG, внешний, pre-committed)
+    // validCredentialRoot — physician registry root (MFSSIA → DKG, external, pre-committed)
     signal input validCredentialRoot;
-    // patientRecordRoot — корень записей пациента (аллергии, строится локально прувером)
+    // patientRecordRoot — patient record root (allergies, built locally by the prover)
     signal input patientRecordRoot;
     signal input nonce;
     signal input approvedDrugIds[N_DRUGS];
     signal input adultMaxDosages[N_DRUGS];
-    // allergyMatrix[i][j] = 1 если аллерген из слота i противопоказан с препаратом j
+    // allergyMatrix[i][j] = 1 if allergen from slot i contraindicates drug j
     signal input allergyMatrix[N_max][N_DRUGS];
 
-    // ── Выходы ──────────────────────────────────────────────────────────────────
+    // ── Outputs ─────────────────────────────────────────────────────────────────
     signal output outcome;
     signal output stmtHash;
 
-    // ── Политика 1: CredValid — врач в реестре ──────────────────────────────────
+    // ── Policy 1: CredValid — physician in registry ─────────────────────────────
     signal policy1;
 
     component credProof = PoseidonMerkleProof(MERKLE_DEPTH);
@@ -212,9 +212,9 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH) {
     }
     policy1 <== credProof.valid;
 
-    // ── Merkle-доказательства для N_max референсных слотов ──────────────────────
-    // Активный слот (refIsActive=1) обязан иметь валидное доказательство против root_M.
-    // Неактивный слот (refIsActive=0) — без ограничений на доказательство.
+    // ── Merkle proofs for N_max reference slots ─────────────────────────────────
+    // An active slot (refIsActive=1) must have a valid proof against root_M.
+    // An inactive slot (refIsActive=0) — no proof constraint.
     component refProof[N_max];
     component refActiveBool[N_max];
     component allergyBool[N_max][N_DRUGS];
@@ -233,7 +233,7 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH) {
         }
 
         // refIsActive[i] === refIsActive[i] * refProof[i].valid
-        // ⟹ при refIsActive=1 требуем valid=1; при refIsActive=0 — без ограничений.
+        // ⟹ when refIsActive=1 we require valid=1; when refIsActive=0 — no constraint.
         activeAndValid[i] <== refIsActive[i] * refProof[i].valid;
         refIsActive[i] === activeAndValid[i];
 
@@ -243,7 +243,7 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH) {
         }
     }
 
-    // ── Политика 2: NoContraindication — нет аллергии на выписанный препарат ────
+    // ── Policy 2: NoContraindication — no allergy to prescribed drug ────────────
     signal policy2;
     component rowSel[N_PRESC][N_max];
     signal activeAllergyConflict[N_PRESC][N_max];
@@ -251,7 +251,7 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH) {
     signal noAllergyPerRx[N_PRESC];
     component allNoConflict[N_PRESC];
 
-    // ── Политика 3: DosageOk — дозировка в допустимых пределах ─────────────────
+    // ── Policy 3: DosageOk — dosage within permitted limits ─────────────────────
     signal policy3;
     component childSel[N_PRESC];
     component adultSel[N_PRESC];
@@ -284,8 +284,8 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH) {
                 rowSel[p][i2].keys[j2]   <== approvedDrugIds[j2];
                 rowSel[p][i2].values[j2] <== allergyMatrix[i2][j2];
             }
-            // Для активного слота: учитываем запись аллергии.
-            // Для неактивного (паддинг): конфликта нет тавтологически.
+            // Active slot: allergy record is applied.
+            // Inactive slot (padding): no conflict tautologically.
             activeAllergyConflict[p][i2] <== refIsActive[i2] * rowSel[p][i2].selected;
             noConflictRow[p][i2] <== 1 - activeAllergyConflict[p][i2];
         }
@@ -317,14 +317,14 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH) {
     policy2 <== allP2.out;
     policy3 <== allP3.out;
 
-    // ── Политика 4: TimeValid — рецепт действителен ─────────────────────────────
+    // ── Policy 4: TimeValid — prescription is still valid ───────────────────────
     signal policy4;
     component timeLe = LessEqThan(BITLEN);
     timeLe.a <== currentTimestamp;
     timeLe.b <== prescriptionTimestamp + validFor;
     policy4 <== timeLe.out;
 
-    // ── Политика 5: NonceBind — нонс привязан к workflowId ──────────────────────
+    // ── Policy 5: NonceBind — nonce is bound to workflowId ──────────────────────
     signal policy5;
     component wfHash = Poseidon(1);
     wfHash.inputs[0] <== workflowId;
@@ -334,7 +334,7 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH) {
     nonceEq.b <== nonce;
     policy5 <== nonceEq.out;
 
-    // ── Финальный AND(P1..P5) ────────────────────────────────────────────────────
+    // ── Final AND(P1..P5) ────────────────────────────────────────────────────────
     component finalAnd = AndN(5);
     finalAnd.in[0] <== policy1;
     finalAnd.in[1] <== policy2;
@@ -354,13 +354,13 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH) {
     stmtHash <== stmtHasher.out;
 }
 
-// Публичные входы: верификатор привязывает доказательство к:
-//   - реестру врачей (validCredentialRoot из DKG через МФССИА)
-//   - корню записей пациента (patientRecordRoot — аллергии, локальный)
-//   - параметрам политики T (approvedDrugIds, allergyMatrix, adultMaxDosages)
-//   - конкретному экземпляру рецепта (stmtHash, nonce)
-// stmtHash и outcome — выходы схемы, всегда публичны.
-// Размер allergyMatrix: N_max × N_DRUGS = 3×3 = 9 публичных сигналов.
+// Public inputs: the verifier binds a proof to:
+//   - physician registry root (validCredentialRoot from DKG via MFSSIA)
+//   - patient record root    (patientRecordRoot — allergies, built locally)
+//   - policy parameters T   (approvedDrugIds, allergyMatrix, adultMaxDosages)
+//   - specific prescription  (stmtHash, nonce)
+// stmtHash and outcome are circuit outputs and are always public.
+// allergyMatrix size: N_max × N_DRUGS = 3×3 = 9 public signals.
 component main {public [
     doctorCredentialHash,
     validCredentialRoot,

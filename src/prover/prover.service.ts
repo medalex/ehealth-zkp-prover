@@ -6,13 +6,13 @@ import { buildPoseidon } from 'circomlibjs';
 import { ProveRequestDto } from './dto/prove-request.dto';
 import { VerifyRequestDto } from './dto/verify-request.dto';
 
-// Размеры схемы — должны совпадать со скомпилированным circom-файлом.
+// Circuit sizes — must match the compiled circom artifact.
 const N_DRUGS = 3;
-const N_max = 3;   // число референсных слотов; n_total ≈ n_cred + N_max·n_Merkle + |Pol|·n_range
+const N_max = 3;   // reference slot count; n_total ≈ n_cred + N_max·n_Merkle + |Pol|·n_range
 const N_PRESC = 1;
 const MERKLE_DEPTH = 3;
 
-// Маппинг аллергена → 0-based индекс в N_DRUGS.
+// Allergen → 0-based drug index mapping.
 // approvedDrugIds = [105, 103, 107]:
 //   j=0 → Metformin (drugId 105)
 //   j=1 → Penicillin (drugId 103)
@@ -23,15 +23,15 @@ const SUBSTANCE_IDX: Record<string, number> = {
   'Amoxicillin': 2, 'amoxicillin': 2,
 };
 
-// Субсумпция β-лактамного класса: аллергия на Penicillin блокирует и Amoxicillin.
-// allergyMatrix[slot][j]=1 для каждого j из этого множества.
+// β-lactam class subsumption: Penicillin allergy also blocks Amoxicillin.
+// allergyMatrix[slot][j]=1 for each j in the blocked set.
 const ALLERGY_BLOCKS: Record<number, number[]> = {
-  1: [1, 2],  // Penicillin (idx=1) ⊑ β-lactam → блокирует Penicillin + Amoxicillin
-  2: [1, 2],  // Amoxicillin (idx=2) ⊑ β-lactam → блокирует тот же класс
-  0: [0],     // Metformin — отдельный класс (biguanide)
+  1: [1, 2],  // Penicillin (idx=1) ⊑ β-lactam → blocks Penicillin + Amoxicillin
+  2: [1, 2],  // Amoxicillin (idx=2) ⊑ β-lactam → blocks the same class
+  0: [0],     // Metformin — separate class (biguanide)
 };
 
-// Индексы публичных сигналов (выходы первые, затем публичные входы в порядке объявления):
+// Public signal indices (outputs first, then public inputs in declaration order):
 // outcome(0), stmtHash(1),
 // doctorCredentialHash(2), validCredentialRoot(3), patientRecordRoot(4), nonce(5),
 // approvedDrugIds[3] → 6-8, allergyMatrix[N_max×N_DRUGS=9] → 9-17, adultMaxDosages[3] → 18-20
@@ -47,10 +47,10 @@ export const PUB = {
   adultMaxDosages: [18, 19, 20],
 } as const;
 
-// Высокоуровневый запрос от hospital-api (ASP.NET Core сериализует в camelCase)
+// High-level request from hospital-api (ASP.NET Core serializes to camelCase)
 interface HighLevelRequest {
   doctorCredentialUal: string;
-  // Данные из реестра МФССИА: credential hash + Merkle proof против validCredentialRoot
+  // MFSSIA registry data: credential hash + Merkle proof against validCredentialRoot
   doctorCredentialHash?: string;
   validCredentialRoot?: string;
   credentialSiblings?: string[];
@@ -94,19 +94,19 @@ export class ProverService implements OnModuleInit {
     return this.poseidon.F.toObject(this.poseidon(inputs));
   }
 
-  // Детерминированное преобразование строки → поле BN254 (31 байт = 248 бит < 254 бит prime)
+  // Deterministic string → BN254 field element (31 bytes = 248 bits < 254-bit prime)
   private stringToField(s: string): bigint {
     const h = createHash('sha256').update(s, 'utf8').digest('hex');
     return BigInt('0x' + h.slice(0, 62));
   }
 
-  // Извлекает первое целое число из строки дозировки ("500mg" → "500")
+  // Extracts the first integer from a dosage string ("500mg" → "500")
   private parseDosage(s: string): string {
     const m = (s ?? '').match(/\d+/);
     return m ? m[0] : '0';
   }
 
-  // Строит дерево Меркле глубины MERKLE_DEPTH (8 листьев) с Poseidon-хешами
+  // Builds a Poseidon Merkle tree of depth MERKLE_DEPTH (8 leaves)
   private buildMerkleTree(leaves: bigint[]): { root: bigint; tree: bigint[][] } {
     const size = 1 << MERKLE_DEPTH;
     const padded = Array.from({ length: size }, (_, i) => i < leaves.length ? leaves[i] : 0n);
@@ -122,7 +122,7 @@ export class ProverService implements OnModuleInit {
     return { root: tree[MERKLE_DEPTH][0], tree };
   }
 
-  // Возвращает доказательство принадлежности листа с индексом leafIdx дереву
+  // Returns a Merkle membership proof for the leaf at leafIdx
   private getMerkleProof(tree: bigint[][], leafIdx: number): { siblings: string[]; pathBits: number[] } {
     const siblings: string[] = [];
     const pathBits: number[] = [];
@@ -130,42 +130,42 @@ export class ProverService implements OnModuleInit {
     for (let d = 0; d < MERKLE_DEPTH; d++) {
       const sibIdx = idx % 2 === 0 ? idx + 1 : idx - 1;
       siblings.push(tree[d][sibIdx].toString());
-      pathBits.push(idx % 2); // 0 = левый ребёнок, 1 = правый
+      pathBits.push(idx % 2); // 0 = left child, 1 = right
       idx = Math.floor(idx / 2);
     }
     return { siblings, pathBits };
   }
 
-  // Трансформирует высокоуровневый запрос hospital-api в circuit-level inputs
+  // Transforms high-level hospital-api request into circuit-level inputs
   private buildHighLevelInput(req: HighLevelRequest, nonce: string): Record<string, unknown> {
     const allergies = req.allergies ?? [];
     // drugId 105 = Metformin (idx 0), drugId 103 = Penicillin (idx 1), drugId 107 = Amoxicillin (idx 2)
     const approvedDrugIds = ['105', '103', '107'];
 
-    // Credential hash: берём из реестра МФССИА если передан, иначе вычисляем из UAL
+    // Credential hash: use MFSSIA registry value if provided, otherwise derive from UAL
     const doctorCredentialHash = req.doctorCredentialHash
       ? BigInt(req.doctorCredentialHash)
       : this.stringToField(req.doctorCredentialUal ?? '');
 
-    // Референсные листья и матрица аллергий
+    // Reference leaves and allergy matrix
     const refLeafValues: bigint[] = [];
     const allergyMatrix: number[][] = [];
 
     for (let i = 0; i < N_max; i++) {
       if (i < allergies.length) {
         const substIdx = SUBSTANCE_IDX[allergies[i]] ?? -1;
-        // Листовой хеш: Poseidon(drugId) для известных веществ, SHA256 для прочих
+        // Leaf hash: Poseidon(drugId) for known substances, SHA256 for others
         const leafVal = substIdx >= 0
           ? this.poseidonHash([BigInt(substIdx + 1)])
           : this.stringToField(allergies[i]);
         refLeafValues.push(leafVal);
-        // Субсумпция: каждый аллерген блокирует весь β-лактамный класс (или только себя)
+        // Subsumption: each allergen blocks the entire β-lactam class (or just itself)
         const row = new Array(N_DRUGS).fill(0);
         const blocked = substIdx >= 0 ? (ALLERGY_BLOCKS[substIdx] ?? [substIdx]) : [];
         for (const j of blocked) row[j] = 1;
         allergyMatrix.push(row);
       } else {
-        // Паддинг: неактивный слот
+        // Padding: inactive slot
         refLeafValues.push(0n);
         allergyMatrix.push(new Array(N_DRUGS).fill(0));
       }
@@ -173,8 +173,8 @@ export class ProverService implements OnModuleInit {
 
     const refIsActive = Array.from({ length: N_max }, (_, i) => i < allergies.length ? 1 : 0);
 
-    // Дерево врача: корень и proof приходят из МФССИА (validCredentialRoot anchored in DKG).
-    // Fallback: строим локально если МФССИА недоступна (для обратной совместимости).
+    // Physician tree: root and proof come from MFSSIA (validCredentialRoot anchored in DKG).
+    // Fallback: build locally if MFSSIA is unavailable (backwards compatibility).
     let validCredentialRoot: string;
     let credSiblings: string[];
     let credPathBits: string[];
@@ -184,7 +184,7 @@ export class ProverService implements OnModuleInit {
       credSiblings = req.credentialSiblings;
       credPathBits = req.credentialPathBits.map(String);
     } else {
-      // Fallback: локальное дерево только из credential hash
+      // Fallback: local single-leaf tree from credential hash
       const { root: credRoot, tree: credTree } = this.buildMerkleTree([doctorCredentialHash]);
       const cp = this.getMerkleProof(credTree, 0);
       validCredentialRoot = credRoot.toString();
@@ -192,7 +192,7 @@ export class ProverService implements OnModuleInit {
       credPathBits = cp.pathBits.map(String);
     }
 
-    // Дерево пациента: только аллергии (листья 0..N_max-1)
+    // Patient tree: allergies only (leaves 0..N_max-1)
     const { root: patientRoot, tree: patientTree } = this.buildMerkleTree(refLeafValues);
 
     const refSiblings = refLeafValues.map((_, i) => {
@@ -204,10 +204,10 @@ export class ProverService implements OnModuleInit {
       return new Array(MERKLE_DEPTH).fill(0);
     });
 
-    // Дозировки: извлекаем числовую часть ("500mg" → "500")
+    // Dosages: extract numeric part ("500mg" → "500")
     const prescribedDosages = (req.dosages ?? []).slice(0, N_PRESC).map(d => this.parseDosage(d));
 
-    // Максимальные дозировки из политик DKG
+    // Maximum dosages from DKG policies
     const adultMax = new Array(N_DRUGS).fill('65535');
     const childMax = new Array(N_DRUGS).fill('65535');
     for (const p of req.policies ?? []) {
@@ -226,8 +226,8 @@ export class ProverService implements OnModuleInit {
       }
     }
 
-    // Временные метки используем нули: 0 ≤ 0 + 65535 → политика TimeValid проходит тривиально.
-    // Реальные Unix-timestamps не помещаются в BITLEN=16 (max 65535).
+    // Timestamps set to zero: 0 ≤ 0 + 65535 → TimeValid policy passes trivially.
+    // Real Unix timestamps do not fit in BITLEN=16 (max 65535).
     return {
       doctorCredentialHash: doctorCredentialHash.toString(),
       validCredentialRoot,
@@ -253,7 +253,7 @@ export class ProverService implements OnModuleInit {
     };
   }
 
-  // Строит circuit input из низкоуровневого DTO (прямые circuit-level поля)
+  // Builds circuit input from low-level DTO (direct circuit-level fields)
   private buildInput(dto: ProveRequestDto, nonce: string): Record<string, unknown> {
     return {
       doctorCredentialHash: dto.doctorCredentialHash,
@@ -298,12 +298,12 @@ export class ProverService implements OnModuleInit {
     let input: Record<string, unknown>;
 
     if ('doctorCredentialUal' in dto) {
-      // Высокоуровневый формат от hospital-api (ASP.NET Core camelCase JSON)
+      // High-level format from hospital-api (ASP.NET Core camelCase JSON)
       const req = dto as HighLevelRequest;
       nonce = this.poseidonHash([BigInt(req.workflowId ?? 0)]).toString();
       input = this.buildHighLevelInput(req, nonce);
     } else {
-      // Низкоуровневый формат (прямые circuit inputs)
+      // Low-level format (direct circuit inputs)
       const req = dto as ProveRequestDto;
       nonce = this.poseidonHash([BigInt(req.workflowId ?? 0)]).toString();
       input = this.buildInput(req, nonce);
@@ -319,7 +319,7 @@ export class ProverService implements OnModuleInit {
     return {
       proof,
       publicSignals,
-      outcome: parseInt(publicSignals[PUB.outcome]) === 1,  // bool для C# System.Text.Json
+      outcome: parseInt(publicSignals[PUB.outcome]) === 1,  // bool for C# System.Text.Json
       stmtHash: publicSignals[PUB.stmtHash],
       nonce,
     };
@@ -339,6 +339,6 @@ export class ProverService implements OnModuleInit {
   }
 }
 
-// Экспорт для hospital-api и pharmacy-api при разборе publicSignals
+// Exported for hospital-api and pharmacy-api when parsing publicSignals
 export { N_DRUGS, N_max, N_PRESC, MERKLE_DEPTH };
-// Амоксициллин (drugId 107, idx 2) блокируется аллергией на Пенициллин через β-лактамную субсумпцию
+// Amoxicillin (drugId 107, idx 2) is blocked by Penicillin allergy via β-lactam class subsumption
