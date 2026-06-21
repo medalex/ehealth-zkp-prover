@@ -48,6 +48,9 @@ export const PUB = {
 // Высокоуровневый запрос от hospital-api (ASP.NET Core сериализует в camelCase)
 interface HighLevelRequest {
   doctorCredentialUal: string;
+  // Канонический credential hash из реестра МФССИА (десятичная строка BigInt).
+  // Если передан — используется напрямую; иначе вычисляется из UAL через stringToField.
+  doctorCredentialHash?: string;
   patientId: string;
   drugIds: number[];
   dosages: string[];
@@ -135,8 +138,10 @@ export class ProverService implements OnModuleInit {
     // drugId 105 = Metformin (idx 0), drugId 103 = Penicillin (idx 1), drugId 107 = Amoxicillin (idx 2)
     const approvedDrugIds = ['105', '103', '107'];
 
-    // Детерминированный хеш UAL врача
-    const doctorCredentialHash = this.stringToField(req.doctorCredentialUal ?? '');
+    // Credential hash: берём из реестра МФССИА если передан, иначе вычисляем из UAL
+    const doctorCredentialHash = req.doctorCredentialHash
+      ? BigInt(req.doctorCredentialHash)
+      : this.stringToField(req.doctorCredentialUal ?? '');
 
     // Референсные листья и матрица аллергий
     const refLeafValues: bigint[] = [];
