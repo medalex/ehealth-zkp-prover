@@ -31,26 +31,30 @@ const ALLERGY_BLOCKS: Record<number, number[]> = {
   0: [0],     // Metformin — отдельный класс (biguanide)
 };
 
-// Индексы публичных сигналов в массиве snarkjs (выходы первые, затем публичные входы):
-// outcome(0), stmtHash(1), doctorCredentialHash(2), validCredentialRoot(3), nonce(4),
-// approvedDrugIds[3] → 5-7, allergyMatrix[N_max×N_DRUGS=9] → 8-16, adultMaxDosages[3] → 17-19
+// Индексы публичных сигналов (выходы первые, затем публичные входы в порядке объявления):
+// outcome(0), stmtHash(1),
+// doctorCredentialHash(2), validCredentialRoot(3), patientRecordRoot(4), nonce(5),
+// approvedDrugIds[3] → 6-8, allergyMatrix[N_max×N_DRUGS=9] → 9-17, adultMaxDosages[3] → 18-20
 export const PUB = {
   outcome: 0,
   stmtHash: 1,
   doctorCredentialHash: 2,
   validCredentialRoot: 3,
-  nonce: 4,
-  approvedDrugIds: [5, 6, 7],
-  allergyMatrixStart: 8,
-  adultMaxDosages: [17, 18, 19],
+  patientRecordRoot: 4,
+  nonce: 5,
+  approvedDrugIds: [6, 7, 8],
+  allergyMatrixStart: 9,
+  adultMaxDosages: [18, 19, 20],
 } as const;
 
 // Высокоуровневый запрос от hospital-api (ASP.NET Core сериализует в camelCase)
 interface HighLevelRequest {
   doctorCredentialUal: string;
-  // Канонический credential hash из реестра МФССИА (десятичная строка BigInt).
-  // Если передан — используется напрямую; иначе вычисляется из UAL через stringToField.
+  // Данные из реестра МФССИА: credential hash + Merkle proof против validCredentialRoot
   doctorCredentialHash?: string;
+  validCredentialRoot?: string;
+  credentialSiblings?: string[];
+  credentialPathBits?: number[];
   patientId: string;
   drugIds: number[];
   dosages: string[];
@@ -169,18 +173,34 @@ export class ProverService implements OnModuleInit {
 
     const refIsActive = Array.from({ length: N_max }, (_, i) => i < allergies.length ? 1 : 0);
 
-    // Дерево Меркле: лист 0 = doctorCredentialHash, листья 1..N_max = refLeaf[0..N_max-1]
-    const treeLeaves = [doctorCredentialHash, ...refLeafValues];
-    const { root, tree } = this.buildMerkleTree(treeLeaves);
+    // Дерево врача: корень и proof приходят из МФССИА (validCredentialRoot anchored in DKG).
+    // Fallback: строим локально если МФССИА недоступна (для обратной совместимости).
+    let validCredentialRoot: string;
+    let credSiblings: string[];
+    let credPathBits: string[];
 
-    const credProof = this.getMerkleProof(tree, 0);
+    if (req.validCredentialRoot && req.credentialSiblings && req.credentialPathBits) {
+      validCredentialRoot = req.validCredentialRoot;
+      credSiblings = req.credentialSiblings;
+      credPathBits = req.credentialPathBits.map(String);
+    } else {
+      // Fallback: локальное дерево только из credential hash
+      const { root: credRoot, tree: credTree } = this.buildMerkleTree([doctorCredentialHash]);
+      const cp = this.getMerkleProof(credTree, 0);
+      validCredentialRoot = credRoot.toString();
+      credSiblings = cp.siblings;
+      credPathBits = cp.pathBits.map(String);
+    }
+
+    // Дерево пациента: только аллергии (листья 0..N_max-1)
+    const { root: patientRoot, tree: patientTree } = this.buildMerkleTree(refLeafValues);
 
     const refSiblings = refLeafValues.map((_, i) => {
-      if (refIsActive[i]) return this.getMerkleProof(tree, i + 1).siblings;
+      if (refIsActive[i]) return this.getMerkleProof(patientTree, i).siblings;
       return new Array(MERKLE_DEPTH).fill('0');
     });
     const refPathBitsArr = refLeafValues.map((_, i) => {
-      if (refIsActive[i]) return this.getMerkleProof(tree, i + 1).pathBits;
+      if (refIsActive[i]) return this.getMerkleProof(patientTree, i).pathBits;
       return new Array(MERKLE_DEPTH).fill(0);
     });
 
@@ -210,13 +230,14 @@ export class ProverService implements OnModuleInit {
     // Реальные Unix-timestamps не помещаются в BITLEN=16 (max 65535).
     return {
       doctorCredentialHash: doctorCredentialHash.toString(),
-      validCredentialRoot: root.toString(),
+      validCredentialRoot,
+      patientRecordRoot: patientRoot.toString(),
       nonce,
       approvedDrugIds,
       allergyMatrix: allergyMatrix.map(row => row.map(String)),
       adultMaxDosages: adultMax,
-      credentialSiblings: credProof.siblings,
-      credentialPathBits: credProof.pathBits.map(String),
+      credentialSiblings: credSiblings,
+      credentialPathBits: credPathBits,
       prescribedDrugIds: (req.drugIds ?? []).slice(0, N_PRESC).map(String),
       prescribedDosages,
       patientAge: String(req.patientAge ?? 0),

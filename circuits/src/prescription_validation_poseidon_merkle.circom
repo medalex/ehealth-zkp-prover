@@ -186,8 +186,10 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH) {
 
     // ── Публичные входы ─────────────────────────────────────────────────────────
 
-    // root_M — корень реестра записей (включает учётные данные врача и записи пациента)
+    // validCredentialRoot — корень реестра врачей (МФССИА → DKG, внешний, pre-committed)
     signal input validCredentialRoot;
+    // patientRecordRoot — корень записей пациента (аллергии, строится локально прувером)
+    signal input patientRecordRoot;
     signal input nonce;
     signal input approvedDrugIds[N_DRUGS];
     signal input adultMaxDosages[N_DRUGS];
@@ -224,7 +226,7 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH) {
 
         refProof[i] = PoseidonMerkleProof(MERKLE_DEPTH);
         refProof[i].leaf         <== refLeaf[i];
-        refProof[i].expectedRoot <== validCredentialRoot;
+        refProof[i].expectedRoot <== patientRecordRoot;
         for (var d = 0; d < MERKLE_DEPTH; d++) {
             refProof[i].siblings[d] <== refSiblings[i][d];
             refProof[i].pathBits[d] <== refPathBits[i][d];
@@ -352,8 +354,9 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH) {
     stmtHash <== stmtHasher.out;
 }
 
-// Публичные входы: верификатор on-chain привязывает доказательство к:
-//   - реестру учётных данных (validCredentialRoot = root_M)
+// Публичные входы: верификатор привязывает доказательство к:
+//   - реестру врачей (validCredentialRoot из DKG через МФССИА)
+//   - корню записей пациента (patientRecordRoot — аллергии, локальный)
 //   - параметрам политики T (approvedDrugIds, allergyMatrix, adultMaxDosages)
 //   - конкретному экземпляру рецепта (stmtHash, nonce)
 // stmtHash и outcome — выходы схемы, всегда публичны.
@@ -361,6 +364,7 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH) {
 component main {public [
     doctorCredentialHash,
     validCredentialRoot,
+    patientRecordRoot,
     nonce,
     approvedDrugIds,
     allergyMatrix,
