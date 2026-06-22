@@ -60,6 +60,7 @@ interface HighLevelRequest {
   dosages: string[];
   patientAge: number;
   workflowId: number;
+  prescriptionIssuedAt?: number;
   allergies: string[];
   labResults: unknown[];
   policies: { medicationCode: string; clinicalCondition: string; comparisonOperator: string; threshold: number }[];
@@ -220,8 +221,9 @@ export class ProverService implements OnModuleInit {
       }
     }
 
-    // Timestamps set to zero: 0 ≤ 0 + 65535 → TimeValid policy passes trivially.
-    // Real Unix timestamps do not fit in BITLEN=16 (max 65535).
+    const nowSec = Math.floor(Date.now() / 1000);
+    const issuedAt = req.prescriptionIssuedAt ?? nowSec;
+
     return {
       doctorCredentialHash: doctorCredentialHash.toString(),
       validCredentialRoot,
@@ -235,9 +237,9 @@ export class ProverService implements OnModuleInit {
       prescribedDrugIds: (req.drugIds ?? []).slice(0, N_PRESC).map(String),
       prescribedDosages,
       patientAge: String(req.patientAge ?? 0),
-      prescriptionTimestamp: '0',
-      validFor: '65535',
-      currentTimestamp: '0',
+      prescriptionTimestamp: String(issuedAt),
+      validFor: '604800',   // 7 days in seconds
+      currentTimestamp: String(nowSec),
       workflowId: String(req.workflowId ?? 0),
       childMaxDosages: childMax,
       refLeaf: refLeafValues.map(String),

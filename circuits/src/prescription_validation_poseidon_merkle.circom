@@ -369,4 +369,4 @@ component main {public [
     nonce,
     approvedDrugIds,
     adultMaxDosages
-]} = PrescriptionValidation(3, 3, 1, 16, 3);
+]} = PrescriptionValidation(3, 3, 1, 32, 3);
