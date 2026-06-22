@@ -13,7 +13,7 @@ export class ProveRequestDto {
   prescribedDosages: string[];    // N_PRESC dosage values
 
   // Policy parameters T from DKG (governance-approved)
-  approvedDrugIds: string[];      // N_DRUGS approved drug identifiers
+  policyDrugIds: string[];        // N_DRUGS drug identifiers covered by policy parameters (dosage limits, allergy rows)
   allergyMatrix: number[][];      // N_max × N_DRUGS: allergyMatrix[i][j]=1 if slot i contraindicates drug j
   adultMaxDosages: string[];      // N_DRUGS max dosages for adults (age >= 11)
   childMaxDosages: string[];      // N_DRUGS max dosages for children (age < 11)

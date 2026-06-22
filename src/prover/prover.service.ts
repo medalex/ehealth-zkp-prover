@@ -13,7 +13,7 @@ const N_PRESC = 1;
 const MERKLE_DEPTH = 3;
 
 // Allergen → 0-based drug index mapping.
-// approvedDrugIds = [105, 103, 107]:
+// policyDrugIds = [105, 103, 107]:
 //   j=0 → Metformin (drugId 105)
 //   j=1 → Penicillin (drugId 103)
 //   j=2 → Amoxicillin (drugId 107)
@@ -34,7 +34,7 @@ const ALLERGY_BLOCKS: Record<number, number[]> = {
 // Public signal indices (outputs first, then public inputs in declaration order):
 // outcome(0), stmtHash(1),
 // doctorCredentialHash(2), validCredentialRoot(3), patientRecordRoot(4), nonce(5),
-// approvedDrugIds[3] → 6-8, adultMaxDosages[3] → 9-11
+// policyDrugIds[3] → 6-8, adultMaxDosages[3] → 9-11
 // allergyMatrix is PRIVATE — not visible in publicSignals
 export const PUB = {
   outcome: 0,
@@ -43,7 +43,7 @@ export const PUB = {
   validCredentialRoot: 3,
   patientRecordRoot: 4,
   nonce: 5,
-  approvedDrugIds: [6, 7, 8],
+  policyDrugIds: [6, 7, 8],
   adultMaxDosages: [9, 10, 11],
 } as const;
 
@@ -141,7 +141,7 @@ export class ProverService implements OnModuleInit {
   private buildHighLevelInput(req: HighLevelRequest, nonce: string): Record<string, unknown> {
     const allergies = req.allergies ?? [];
     // drugId 105 = Metformin (idx 0), drugId 103 = Penicillin (idx 1), drugId 107 = Amoxicillin (idx 2)
-    const approvedDrugIds = ['105', '103', '107'];
+    const policyDrugIds = ['105', '103', '107'];
 
     // Credential hash: use MFSSIA registry value if provided, otherwise derive from UAL
     const doctorCredentialHash = req.doctorCredentialHash
@@ -229,7 +229,7 @@ export class ProverService implements OnModuleInit {
       validCredentialRoot,
       patientRecordRoot: patientRoot.toString(),
       nonce,
-      approvedDrugIds,
+      policyDrugIds,
       allergyMatrix: allergyMatrix.map(row => row.map(String)),
       adultMaxDosages: adultMax,
       credentialSiblings: credSiblings,
@@ -255,7 +255,7 @@ export class ProverService implements OnModuleInit {
       doctorCredentialHash: dto.doctorCredentialHash,
       validCredentialRoot: dto.validCredentialRoot,
       nonce,
-      approvedDrugIds: dto.approvedDrugIds,
+      policyDrugIds: dto.policyDrugIds,
       allergyMatrix: dto.allergyMatrix.map(row => row.map(String)),
       adultMaxDosages: dto.adultMaxDosages,
       credentialSiblings: dto.credentialSiblings,

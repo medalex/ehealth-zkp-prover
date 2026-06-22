@@ -191,7 +191,7 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH) {
     // patientRecordRoot — patient record root (allergies, built locally by the prover)
     signal input patientRecordRoot;
     signal input nonce;
-    signal input approvedDrugIds[N_DRUGS];
+    signal input policyDrugIds[N_DRUGS];
     signal input adultMaxDosages[N_DRUGS];
     // allergyMatrix[i][j] = 1 if allergen from slot i contraindicates drug j
     signal input allergyMatrix[N_max][N_DRUGS];
@@ -271,9 +271,9 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH) {
         adultSel[p].key <== prescribedDrugIds[p];
 
         for (var i1 = 0; i1 < N_DRUGS; i1++) {
-            childSel[p].keys[i1]   <== approvedDrugIds[i1];
+            childSel[p].keys[i1]   <== policyDrugIds[i1];
             childSel[p].values[i1] <== childMaxDosages[i1];
-            adultSel[p].keys[i1]   <== approvedDrugIds[i1];
+            adultSel[p].keys[i1]   <== policyDrugIds[i1];
             adultSel[p].values[i1] <== adultMaxDosages[i1];
         }
 
@@ -281,7 +281,7 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH) {
             rowSel[p][i2] = SelectValue(N_DRUGS);
             rowSel[p][i2].key <== prescribedDrugIds[p];
             for (var j2 = 0; j2 < N_DRUGS; j2++) {
-                rowSel[p][i2].keys[j2]   <== approvedDrugIds[j2];
+                rowSel[p][i2].keys[j2]   <== policyDrugIds[j2];
                 rowSel[p][i2].values[j2] <== allergyMatrix[i2][j2];
             }
             // Active slot: allergy record is applied.
@@ -357,7 +357,7 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH) {
 // Public inputs: the verifier binds a proof to:
 //   - physician registry root (validCredentialRoot from DKG via MFSSIA)
 //   - patient record root    (patientRecordRoot — allergies, built locally)
-//   - policy parameters T   (approvedDrugIds, adultMaxDosages)
+//   - policy parameters T   (policyDrugIds, adultMaxDosages)
 //   - specific prescription  (stmtHash, nonce)
 // stmtHash and outcome are circuit outputs and are always public.
 // allergyMatrix is a PRIVATE input — the verifier sees only the outcome, not patient allergy data.
@@ -367,6 +367,6 @@ component main {public [
     validCredentialRoot,
     patientRecordRoot,
     nonce,
-    approvedDrugIds,
+    policyDrugIds,
     adultMaxDosages
 ]} = PrescriptionValidation(3, 3, 1, 32, 3);
