@@ -212,7 +212,7 @@ export class ProverService implements OnModuleInit {
                  : code.includes('amoxicillin') ? 2
                  : -1;
       if (dIdx < 0) continue;
-      const thresh = Math.min(Math.floor(Number(p.threshold)), 65535).toString();
+      const thresh = Math.floor(Number(p.threshold)).toString();
       const cond = (p.clinicalCondition ?? '').toLowerCase();
       if (cond.includes('child') || cond.includes('pediatric')) {
         childMax[dIdx] = thresh;
