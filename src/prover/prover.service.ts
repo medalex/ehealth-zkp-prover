@@ -179,18 +179,12 @@ export class ProverService implements OnModuleInit {
     let credSiblings: string[];
     let credPathBits: string[];
 
-    if (req.validCredentialRoot && req.credentialSiblings && req.credentialPathBits) {
-      validCredentialRoot = req.validCredentialRoot;
-      credSiblings = req.credentialSiblings;
-      credPathBits = req.credentialPathBits.map(String);
-    } else {
-      // Fallback: local single-leaf tree from credential hash
-      const { root: credRoot, tree: credTree } = this.buildMerkleTree([doctorCredentialHash]);
-      const cp = this.getMerkleProof(credTree, 0);
-      validCredentialRoot = credRoot.toString();
-      credSiblings = cp.siblings;
-      credPathBits = cp.pathBits.map(String);
+    if (!req.validCredentialRoot || !req.credentialSiblings || !req.credentialPathBits) {
+      throw new Error('validCredentialRoot, credentialSiblings and credentialPathBits are required — fetch them from MFSSIA physician registry');
     }
+    validCredentialRoot = req.validCredentialRoot;
+    credSiblings = req.credentialSiblings;
+    credPathBits = req.credentialPathBits.map(String);
 
     // Patient tree: allergies only (leaves 0..N_max-1)
     const { root: patientRoot, tree: patientTree } = this.buildMerkleTree(refLeafValues);
