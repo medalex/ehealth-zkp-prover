@@ -34,7 +34,8 @@ const ALLERGY_BLOCKS: Record<number, number[]> = {
 // Public signal indices (outputs first, then public inputs in declaration order):
 // outcome(0), stmtHash(1),
 // doctorCredentialHash(2), validCredentialRoot(3), patientRecordRoot(4), nonce(5),
-// approvedDrugIds[3] → 6-8, allergyMatrix[N_max×N_DRUGS=9] → 9-17, adultMaxDosages[3] → 18-20
+// approvedDrugIds[3] → 6-8, adultMaxDosages[3] → 9-11
+// allergyMatrix is PRIVATE — not visible in publicSignals
 export const PUB = {
   outcome: 0,
   stmtHash: 1,
@@ -43,8 +44,7 @@ export const PUB = {
   patientRecordRoot: 4,
   nonce: 5,
   approvedDrugIds: [6, 7, 8],
-  allergyMatrixStart: 9,
-  adultMaxDosages: [18, 19, 20],
+  adultMaxDosages: [9, 10, 11],
 } as const;
 
 // High-level request from hospital-api (ASP.NET Core serializes to camelCase)

@@ -357,16 +357,16 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH) {
 // Public inputs: the verifier binds a proof to:
 //   - physician registry root (validCredentialRoot from DKG via MFSSIA)
 //   - patient record root    (patientRecordRoot — allergies, built locally)
-//   - policy parameters T   (approvedDrugIds, allergyMatrix, adultMaxDosages)
+//   - policy parameters T   (approvedDrugIds, adultMaxDosages)
 //   - specific prescription  (stmtHash, nonce)
 // stmtHash and outcome are circuit outputs and are always public.
-// allergyMatrix size: N_max × N_DRUGS = 3×3 = 9 public signals.
+// allergyMatrix is a PRIVATE input — the verifier sees only the outcome, not patient allergy data.
+// Total public signals: 2 outputs + 10 public inputs = 12.
 component main {public [
     doctorCredentialHash,
     validCredentialRoot,
     patientRecordRoot,
     nonce,
     approvedDrugIds,
-    allergyMatrix,
     adultMaxDosages
 ]} = PrescriptionValidation(3, 3, 1, 16, 3);
