@@ -11,6 +11,25 @@ const N_DRUGS = 3;
 const N_max = 3;   // reference slot count; n_total ≈ n_cred + N_max·n_Merkle + |Pol|·n_range
 const N_PRESC = 1;
 const MERKLE_DEPTH = 3;
+const N_LAB = 2;   // max lab-based clinical policy slots
+
+// medicationCode → drugId (must align with policyDrugIds)
+const DRUG_ID: Record<string, number> = {
+  metformin: 105, penicillin: 103, amoxicillin: 107,
+};
+
+// Clinical lab metrics — policies on these become lab-policy slots (P6),
+// everything else is folded into dosage limits (P3).
+const LAB_METRICS = new Set(['egfr', 'creatinine', 'alt', 'ast', 'inr']);
+
+// DKG comparison operator → circuit op code for the required (safe) condition:
+// 0=GTE, 1=LTE, 2=EQ, 3=NEQ
+const OP_CODE: Record<string, number> = {
+  '>=': 0, 'gte': 0, '>': 0,
+  '<=': 1, 'lte': 1, '<': 1,
+  '=': 2, '==': 2, 'eq': 2,
+  '!=': 3, 'neq': 3,
+};
 
 // Allergen → 0-based drug index mapping.
 // policyDrugIds = [105, 103, 107]:
@@ -34,8 +53,9 @@ const ALLERGY_BLOCKS: Record<number, number[]> = {
 // Public signal indices (outputs first, then public inputs in declaration order):
 // outcome(0), stmtHash(1),
 // doctorCredentialHash(2), validCredentialRoot(3), patientRecordRoot(4), nonce(5),
-// policyDrugIds[3] → 6-8, adultMaxDosages[3] → 9-11
-// allergyMatrix is PRIVATE — not visible in publicSignals
+// policyDrugIds[3] → 6-8, adultMaxDosages[3] → 9-11,
+// labThreshold[2] → 12-13, labRequiredOp[2] → 14-15, labAppliesToDrug[2] → 16-17
+// allergyMatrix and labValue are PRIVATE — not visible in publicSignals
 export const PUB = {
   outcome: 0,
   stmtHash: 1,
@@ -45,6 +65,9 @@ export const PUB = {
   nonce: 5,
   policyDrugIds: [6, 7, 8],
   adultMaxDosages: [9, 10, 11],
+  labThreshold: [12, 13],
+  labRequiredOp: [14, 15],
+  labAppliesToDrug: [16, 17],
 } as const;
 
 // High-level request from hospital-api (ASP.NET Core serializes to camelCase)
@@ -62,7 +85,7 @@ interface HighLevelRequest {
   workflowId: number;
   prescriptionIssuedAt?: number;
   allergies: string[];
-  labResults: unknown[];
+  labResults: { metric?: string; loincCode?: string; value?: number }[];
   policies: { medicationCode: string; clinicalCondition: string; comparisonOperator: string; threshold: number }[];
 }
 
@@ -202,10 +225,12 @@ export class ProverService implements OnModuleInit {
     // Dosages: extract numeric part ("500mg" → "500")
     const prescribedDosages = (req.dosages ?? []).slice(0, N_PRESC).map(d => this.parseDosage(d));
 
-    // Maximum dosages from DKG policies
+    // Maximum dosages from DKG policies (lab-metric policies are routed to P6 below)
     const adultMax = new Array(N_DRUGS).fill('65535');
     const childMax = new Array(N_DRUGS).fill('65535');
     for (const p of req.policies ?? []) {
+      const cond = (p.clinicalCondition ?? '').toLowerCase().trim();
+      if (LAB_METRICS.has(cond)) continue;   // lab policy → handled by P6, not dosage
       const code = (p.medicationCode ?? '').toLowerCase();
       const dIdx = code.includes('metformin') ? 0
                  : code.includes('penicillin') ? 1
@@ -213,12 +238,39 @@ export class ProverService implements OnModuleInit {
                  : -1;
       if (dIdx < 0) continue;
       const thresh = Math.floor(Number(p.threshold)).toString();
-      const cond = (p.clinicalCondition ?? '').toLowerCase();
       if (cond.includes('child') || cond.includes('pediatric')) {
         childMax[dIdx] = thresh;
       } else {
         adultMax[dIdx] = thresh;
       }
+    }
+
+    // Lab-based clinical policies (P6) — eGFR etc.
+    // A slot is activated only when the patient has a matching lab measurement;
+    // missing measurement → slot inactive → no block (cannot evaluate).
+    const labResults = req.labResults ?? [];
+    const labThreshold = new Array(N_LAB).fill('0');
+    const labRequiredOp = new Array(N_LAB).fill('0');
+    const labAppliesToDrug = new Array(N_LAB).fill('0');
+    const labValue = new Array(N_LAB).fill('0');
+    const labIsActive = new Array(N_LAB).fill('0');
+
+    let labSlot = 0;
+    for (const p of req.policies ?? []) {
+      const metric = (p.clinicalCondition ?? '').toLowerCase().trim();
+      if (!LAB_METRICS.has(metric)) continue;
+      if (labSlot >= N_LAB) break;
+      const drugId = DRUG_ID[(p.medicationCode ?? '').toLowerCase()] ?? 0;
+      if (!drugId) continue;
+      const lr = labResults.find(r => (r.metric ?? '').toLowerCase().trim() === metric);
+      if (!lr) continue;   // no measurement on file → cannot evaluate this policy
+      const op = OP_CODE[(p.comparisonOperator ?? '').toLowerCase().trim()] ?? 0;
+      labThreshold[labSlot]     = String(Math.floor(Number(p.threshold)));
+      labRequiredOp[labSlot]    = String(op);
+      labAppliesToDrug[labSlot] = String(drugId);
+      labValue[labSlot]         = String(Math.floor(Number(lr.value ?? 0)));
+      labIsActive[labSlot]      = '1';
+      labSlot++;
     }
 
     const nowSec = Math.floor(Date.now() / 1000);
@@ -246,6 +298,11 @@ export class ProverService implements OnModuleInit {
       refSiblings,
       refPathBits: refPathBitsArr.map(row => row.map(String)),
       refIsActive: refIsActive.map(String),
+      labValue,
+      labIsActive,
+      labThreshold,
+      labRequiredOp,
+      labAppliesToDrug,
     };
   }
 
@@ -272,6 +329,11 @@ export class ProverService implements OnModuleInit {
       refSiblings: dto.refSiblings.map(row => row.map(String)),
       refPathBits: dto.refPathBits.map(row => row.map(String)),
       refIsActive: dto.refIsActive.map(String),
+      labValue: dto.labValue,
+      labIsActive: dto.labIsActive.map(String),
+      labThreshold: dto.labThreshold,
+      labRequiredOp: dto.labRequiredOp.map(String),
+      labAppliesToDrug: dto.labAppliesToDrug,
     };
   }
 

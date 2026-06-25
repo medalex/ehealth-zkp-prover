@@ -155,7 +155,8 @@ template PoseidonMerkleProof(depth) {
 // N_PRESC      — number of prescriptions per proof.
 // BITLEN       — bit width for range checks.
 // MERKLE_DEPTH — Merkle tree depth.
-template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH) {
+// N_LAB        — max number of lab-based clinical policy slots (eGFR etc.).
+template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH, N_LAB) {
 
     // ── Private inputs ──────────────────────────────────────────────────────────
 
@@ -174,6 +175,12 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH) {
     signal input validFor;
     signal input currentTimestamp;
     signal input workflowId;
+
+    // Lab-based clinical policies (eGFR etc.)
+    // labValue[L]    — actual patient measurement from lab-api (PRIVATE, trusted prover)
+    // labIsActive[L] — 1 = slot in use, 0 = padding (passes tautologically)
+    signal input labValue[N_LAB];
+    signal input labIsActive[N_LAB];
 
     // N_max patient record reference slots (allergies etc.)
     // refLeaf[i]     = Poseidon(recordId, recordType, substanceId, ...)
@@ -195,6 +202,14 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH) {
     signal input adultMaxDosages[N_DRUGS];
     // allergyMatrix[i][j] = 1 if allergen from slot i contraindicates drug j
     signal input allergyMatrix[N_max][N_DRUGS];
+
+    // Lab policy parameters from DKG (governance-approved, PUBLIC)
+    // labThreshold[L]     — clinical threshold value (e.g. 30 for eGFR)
+    // labRequiredOp[L]    — required (safe) condition: 0=GTE, 1=LTE, 2=EQ, 3=NEQ
+    // labAppliesToDrug[L] — drugId the policy targets (0 for padding slots)
+    signal input labThreshold[N_LAB];
+    signal input labRequiredOp[N_LAB];
+    signal input labAppliesToDrug[N_LAB];
 
     // ── Outputs ─────────────────────────────────────────────────────────────────
     signal output outcome;
@@ -334,13 +349,86 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH) {
     nonceEq.b <== nonce;
     policy5 <== nonceEq.out;
 
-    // ── Final AND(P1..P5) ────────────────────────────────────────────────────────
-    component finalAnd = AndN(5);
+    // ── Policy 6: LabPolicyOk — lab-based clinical contraindications ─────────────
+    // For each active slot whose policy targets the prescribed drug, the required
+    // (safe) condition must hold; otherwise the prescription is blocked.
+    // labRequiredOp encodes the SAFE condition; violation = its negation:
+    //   GTE(0): safe = value >= threshold → viol = value <  threshold
+    //   LTE(1): safe = value <= threshold → viol = threshold < value
+    //   EQ (2): safe = value == threshold → viol = value != threshold
+    //   NEQ(3): safe = value != threshold → viol = value == threshold
+    signal policy6;
+    component labActiveBool[N_LAB];
+    component labLt[N_LAB];
+    component labGt[N_LAB];
+    component labEq[N_LAB];
+    component isOp0[N_LAB];
+    component isOp1[N_LAB];
+    component isOp2[N_LAB];
+    component isOp3[N_LAB];
+    component labApplies[N_LAB];
+    signal vlt[N_LAB];
+    signal vgt[N_LAB];
+    signal veq2[N_LAB];
+    signal veq3[N_LAB];
+    signal labViol[N_LAB];
+    signal labT1[N_LAB];
+    signal labBlock[N_LAB];
+    signal labNoBlock[N_LAB];
+    component allLabOk = AndN(N_LAB);
+
+    for (var L = 0; L < N_LAB; L++) {
+        labActiveBool[L] = ForceBool();
+        labActiveBool[L].in <== labIsActive[L];
+
+        // value < threshold
+        labLt[L] = LessThan(BITLEN);
+        labLt[L].a <== labValue[L];
+        labLt[L].b <== labThreshold[L];
+        // threshold < value
+        labGt[L] = LessThan(BITLEN);
+        labGt[L].a <== labThreshold[L];
+        labGt[L].b <== labValue[L];
+        // value == threshold
+        labEq[L] = IsEqual();
+        labEq[L].a <== labValue[L];
+        labEq[L].b <== labThreshold[L];
+
+        // operator selector: exactly one of op∈{0,1,2,3}
+        isOp0[L] = IsEqual();  isOp0[L].a <== labRequiredOp[L];  isOp0[L].b <== 0;
+        isOp1[L] = IsEqual();  isOp1[L].a <== labRequiredOp[L];  isOp1[L].b <== 1;
+        isOp2[L] = IsEqual();  isOp2[L].a <== labRequiredOp[L];  isOp2[L].b <== 2;
+        isOp3[L] = IsEqual();  isOp3[L].a <== labRequiredOp[L];  isOp3[L].b <== 3;
+        isOp0[L].out + isOp1[L].out + isOp2[L].out + isOp3[L].out === 1;
+
+        // violation = selected comparison (each term is a single quadratic product)
+        vlt[L]  <== isOp0[L].out * labLt[L].out;
+        vgt[L]  <== isOp1[L].out * labGt[L].out;
+        veq2[L] <== isOp2[L].out * (1 - labEq[L].out);
+        veq3[L] <== isOp3[L].out * labEq[L].out;
+        labViol[L] <== vlt[L] + vgt[L] + veq2[L] + veq3[L];
+
+        // does this policy target the prescribed drug? (N_PRESC=1)
+        labApplies[L] = IsEqual();
+        labApplies[L].a <== labAppliesToDrug[L];
+        labApplies[L].b <== prescribedDrugIds[0];
+
+        // block = active AND violated AND applies
+        labT1[L]      <== labIsActive[L] * labViol[L];
+        labBlock[L]   <== labT1[L] * labApplies[L].out;
+        labNoBlock[L] <== 1 - labBlock[L];
+        allLabOk.in[L] <== labNoBlock[L];
+    }
+    policy6 <== allLabOk.out;
+
+    // ── Final AND(P1..P6) ────────────────────────────────────────────────────────
+    component finalAnd = AndN(6);
     finalAnd.in[0] <== policy1;
     finalAnd.in[1] <== policy2;
     finalAnd.in[2] <== policy3;
     finalAnd.in[3] <== policy4;
     finalAnd.in[4] <== policy5;
+    finalAnd.in[5] <== policy6;
     outcome <== finalAnd.out;
 
     // ── stmtHash = Poseidon(dCH, nonce, drugIds..., dosages...) ─────────────────
@@ -357,16 +445,21 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH) {
 // Public inputs: the verifier binds a proof to:
 //   - physician registry root (validCredentialRoot from DKG via MFSSIA)
 //   - patient record root    (patientRecordRoot — allergies, built locally)
-//   - policy parameters T   (policyDrugIds, adultMaxDosages)
+//   - policy parameters T   (policyDrugIds, adultMaxDosages, lab policy params)
 //   - specific prescription  (stmtHash, nonce)
 // stmtHash and outcome are circuit outputs and are always public.
-// allergyMatrix is a PRIVATE input — the verifier sees only the outcome, not patient allergy data.
-// Total public signals: 2 outputs + 10 public inputs = 12.
+// allergyMatrix and labValue are PRIVATE — the verifier sees only the outcome,
+// not patient allergy data or lab measurements.
+// Public signals: 2 outputs + 6 base inputs + 3·N_LAB lab params.
+// With N_LAB=2: 2 + 6 + 6 = 14... (policyDrugIds[3]+adultMaxDosages[3] expand) → nPublic 18.
 component main {public [
     doctorCredentialHash,
     validCredentialRoot,
     patientRecordRoot,
     nonce,
     policyDrugIds,
-    adultMaxDosages
-]} = PrescriptionValidation(3, 3, 1, 32, 3);
+    adultMaxDosages,
+    labThreshold,
+    labRequiredOp,
+    labAppliesToDrug
+]} = PrescriptionValidation(3, 3, 1, 32, 3, 2);
