@@ -7,3 +7,7 @@ circuits/*.sym
 circuits/pot*.ptau
 circuits/*_js/
 circuits/circuit_0.zkey
+
+# Stray circom artifacts in repo root
+*.sym
+*.r1cs
