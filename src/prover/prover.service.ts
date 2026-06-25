@@ -85,7 +85,7 @@ interface HighLevelRequest {
   workflowId: number;
   prescriptionIssuedAt?: number;
   allergies: string[];
-  labResults: { metric?: string; loincCode?: string; value?: number }[];
+  labResults: { metric?: string; loincCode?: string; value?: number; measuredAt?: string }[];
   policies: { medicationCode: string; clinicalCondition: string; comparisonOperator: string; threshold: number }[];
 }
 
@@ -262,8 +262,11 @@ export class ProverService implements OnModuleInit {
       if (labSlot >= N_LAB) break;
       const drugId = DRUG_ID[(p.medicationCode ?? '').toLowerCase()] ?? 0;
       if (!drugId) continue;
-      const lr = labResults.find(r => (r.metric ?? '').toLowerCase().trim() === metric);
-      if (!lr) continue;   // no measurement on file → cannot evaluate this policy
+      // Use the most recent measurement for this metric (a patient may have several)
+      const matches = labResults.filter(r => (r.metric ?? '').toLowerCase().trim() === metric);
+      if (!matches.length) continue;   // no measurement on file → cannot evaluate this policy
+      const lr = matches.sort((a, b) =>
+        new Date(b.measuredAt ?? 0).getTime() - new Date(a.measuredAt ?? 0).getTime())[0];
       const op = OP_CODE[(p.comparisonOperator ?? '').toLowerCase().trim()] ?? 0;
       labThreshold[labSlot]     = String(Math.floor(Number(p.threshold)));
       labRequiredOp[labSlot]    = String(op);
