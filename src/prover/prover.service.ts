@@ -85,6 +85,14 @@ interface HighLevelRequest {
   workflowId: number;
   prescriptionIssuedAt?: number;
   allergies: string[];
+  // MFSSIA patient-record proof (allergy tree built from DKG, anchored). When present,
+  // the prover uses these instead of building the tree locally.
+  substances?: string[];
+  patientRecordRoot?: string;
+  refLeaf?: string[];
+  refSiblings?: string[][];
+  refPathBits?: number[][];
+  refIsActive?: number[];
   labResults: { metric?: string; loincCode?: string; value?: number; measuredAt?: string }[];
   policies: { medicationCode: string; clinicalCondition: string; comparisonOperator: string; threshold: number }[];
 }
@@ -171,56 +179,67 @@ export class ProverService implements OnModuleInit {
       ? BigInt(req.doctorCredentialHash)
       : this.stringToField(req.doctorCredentialUal ?? '');
 
-    // Reference leaves and allergy matrix
-    const refLeafValues: bigint[] = [];
-    const allergyMatrix: number[][] = [];
-
-    for (let i = 0; i < N_max; i++) {
-      if (i < allergies.length) {
-        const substIdx = SUBSTANCE_IDX[allergies[i]] ?? -1;
-        // Leaf hash: Poseidon(drugId) for known substances, SHA256 for others
-        const leafVal = substIdx >= 0
-          ? this.poseidonHash([BigInt(substIdx + 1)])
-          : this.stringToField(allergies[i]);
-        refLeafValues.push(leafVal);
-        // Subsumption: each allergen blocks the entire β-lactam class (or just itself)
+    // Contraindication matrix from active allergy substances (β-lactam subsumption).
+    const buildAllergyMatrix = (subs: string[]): number[][] => {
+      const m: number[][] = [];
+      for (let i = 0; i < N_max; i++) {
         const row = new Array(N_DRUGS).fill(0);
-        const blocked = substIdx >= 0 ? (ALLERGY_BLOCKS[substIdx] ?? [substIdx]) : [];
-        for (const j of blocked) row[j] = 1;
-        allergyMatrix.push(row);
-      } else {
-        // Padding: inactive slot
-        refLeafValues.push(0n);
-        allergyMatrix.push(new Array(N_DRUGS).fill(0));
+        if (i < subs.length) {
+          const substIdx = SUBSTANCE_IDX[subs[i]] ?? -1;
+          const blocked = substIdx >= 0 ? (ALLERGY_BLOCKS[substIdx] ?? [substIdx]) : [];
+          for (const j of blocked) row[j] = 1;
+        }
+        m.push(row);
       }
-    }
+      return m;
+    };
 
-    const refIsActive = Array.from({ length: N_max }, (_, i) => i < allergies.length ? 1 : 0);
+    // Per-patient leaf binding (shared contract with MFSSIA patient-record registry):
+    //   leaf = Poseidon(stringToField(patientId), substanceCode)
+    const patientField = this.stringToField((req.patientId ?? '').toLowerCase());
+    const leafFor = (substance: string): bigint => {
+      const substIdx = SUBSTANCE_IDX[substance] ?? -1;
+      const code = substIdx >= 0 ? BigInt(substIdx + 1) : this.stringToField(substance);
+      return this.poseidonHash([patientField, code]);
+    };
 
-    // Physician tree: root and proof come from MFSSIA (validCredentialRoot anchored in DKG).
-    // Fallback: build locally if MFSSIA is unavailable (backwards compatibility).
-    let validCredentialRoot: string;
-    let credSiblings: string[];
-    let credPathBits: string[];
-
+    // Physician credential: root + proof come from MFSSIA (required).
     if (!req.validCredentialRoot || !req.credentialSiblings || !req.credentialPathBits) {
       throw new Error('validCredentialRoot, credentialSiblings and credentialPathBits are required — fetch them from MFSSIA physician registry');
     }
-    validCredentialRoot = req.validCredentialRoot;
-    credSiblings = req.credentialSiblings;
-    credPathBits = req.credentialPathBits.map(String);
+    const validCredentialRoot = req.validCredentialRoot;
+    const credSiblings = req.credentialSiblings;
+    const credPathBits = req.credentialPathBits.map(String);
 
-    // Patient tree: allergies only (leaves 0..N_max-1)
-    const { root: patientRoot, tree: patientTree } = this.buildMerkleTree(refLeafValues);
+    // Patient allergy record: prefer the MFSSIA-anchored proof (built from DKG allergies,
+    // leaf bound to patientId); fall back to building it locally from the supplied list.
+    let patientRecordRoot: string;
+    let refLeaf: string[];
+    let refSiblings: string[][];
+    let refPathBitsArr: number[][];
+    let refIsActive: number[];
+    let allergyMatrix: number[][];
 
-    const refSiblings = refLeafValues.map((_, i) => {
-      if (refIsActive[i]) return this.getMerkleProof(patientTree, i).siblings;
-      return new Array(MERKLE_DEPTH).fill('0');
-    });
-    const refPathBitsArr = refLeafValues.map((_, i) => {
-      if (refIsActive[i]) return this.getMerkleProof(patientTree, i).pathBits;
-      return new Array(MERKLE_DEPTH).fill(0);
-    });
+    if (req.patientRecordRoot && req.refLeaf && req.refSiblings && req.refPathBits && req.refIsActive) {
+      patientRecordRoot = req.patientRecordRoot;
+      refLeaf = req.refLeaf;
+      refSiblings = req.refSiblings;
+      refPathBitsArr = req.refPathBits;
+      refIsActive = req.refIsActive;
+      allergyMatrix = buildAllergyMatrix(req.substances ?? allergies);
+    } else {
+      refIsActive = Array.from({ length: N_max }, (_, i) => (i < allergies.length ? 1 : 0));
+      const refLeafValues: bigint[] = [];
+      for (let i = 0; i < N_max; i++) {
+        refLeafValues.push(i < allergies.length ? leafFor(allergies[i]) : 0n);
+      }
+      const { root, tree } = this.buildMerkleTree(refLeafValues);
+      patientRecordRoot = root.toString();
+      refLeaf = refLeafValues.map(String);
+      refSiblings = refLeafValues.map((_, i) => refIsActive[i] ? this.getMerkleProof(tree, i).siblings : new Array(MERKLE_DEPTH).fill('0'));
+      refPathBitsArr = refLeafValues.map((_, i) => refIsActive[i] ? this.getMerkleProof(tree, i).pathBits : new Array(MERKLE_DEPTH).fill(0));
+      allergyMatrix = buildAllergyMatrix(allergies);
+    }
 
     // Dosages: extract numeric part ("500mg" → "500")
     const prescribedDosages = (req.dosages ?? []).slice(0, N_PRESC).map(d => this.parseDosage(d));
@@ -282,7 +301,7 @@ export class ProverService implements OnModuleInit {
     return {
       doctorCredentialHash: doctorCredentialHash.toString(),
       validCredentialRoot,
-      patientRecordRoot: patientRoot.toString(),
+      patientRecordRoot,
       nonce,
       policyDrugIds,
       allergyMatrix: allergyMatrix.map(row => row.map(String)),
@@ -297,7 +316,7 @@ export class ProverService implements OnModuleInit {
       currentTimestamp: String(nowSec),
       workflowId: String(req.workflowId ?? 0),
       childMaxDosages: childMax,
-      refLeaf: refLeafValues.map(String),
+      refLeaf,
       refSiblings,
       refPathBits: refPathBitsArr.map(row => row.map(String)),
       refIsActive: refIsActive.map(String),
