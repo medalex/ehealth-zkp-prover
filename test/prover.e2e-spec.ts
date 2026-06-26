@@ -64,33 +64,103 @@ const labResult = (value: number, measuredAt: string, metric = 'eGFR') => ({
   measuredAt,
 });
 
+// Same substance → id mapping as the prover and the MFSSIA patient-record registry.
+const SUBSTANCE_IDX: Record<string, number> = { metformin: 0, penicillin: 1, amoxicillin: 2 };
+
+// Builds the MFSSIA patient-record proof: a per-patient allergy Merkle tree with
+// leaf = Poseidon(stringToField(patientId), substanceId+1) — the shared leaf contract.
+function buildPatientRecord(poseidon: any, patientId: string, allergies: string[]) {
+  const F = poseidon.F;
+  const ph = (a: bigint, b: bigint) => F.toObject(poseidon([a, b]));
+  const patientField = credHashOf(patientId.toLowerCase());
+  const leafFor = (s: string): bigint => {
+    const idx = SUBSTANCE_IDX[s.toLowerCase()];
+    const code = idx !== undefined ? BigInt(idx + 1) : credHashOf(s);
+    return ph(patientField, code);
+  };
+
+  const N_MAX = 3;
+  const size = 1 << MERKLE_DEPTH;
+  const active = allergies.slice(0, N_MAX);
+  const leafValues: bigint[] = Array.from({ length: N_MAX }, (_, i) =>
+    i < active.length ? leafFor(active[i]) : 0n);
+  const padded = Array.from({ length: size }, (_, i) => (i < leafValues.length ? leafValues[i] : 0n));
+
+  const tree: bigint[][] = [padded];
+  for (let d = 0; d < MERKLE_DEPTH; d++) {
+    const cur = tree[d];
+    const next: bigint[] = [];
+    for (let i = 0; i < cur.length; i += 2) next.push(ph(cur[i], cur[i + 1]));
+    tree.push(next);
+  }
+
+  const refSiblings: string[][] = [];
+  const refPathBits: number[][] = [];
+  const refIsActive: number[] = [];
+  for (let i = 0; i < N_MAX; i++) {
+    const isActive = i < active.length ? 1 : 0;
+    refIsActive.push(isActive);
+    if (isActive) {
+      const sib: string[] = [];
+      const bits: number[] = [];
+      let idx = i;
+      for (let d = 0; d < MERKLE_DEPTH; d++) {
+        const s = idx % 2 === 0 ? idx + 1 : idx - 1;
+        sib.push(tree[d][s].toString());
+        bits.push(idx % 2);
+        idx = Math.floor(idx / 2);
+      }
+      refSiblings.push(sib);
+      refPathBits.push(bits);
+    } else {
+      refSiblings.push(new Array(MERKLE_DEPTH).fill('0'));
+      refPathBits.push(new Array(MERKLE_DEPTH).fill(0));
+    }
+  }
+
+  return {
+    substances: active,
+    patientRecordRoot: tree[MERKLE_DEPTH][0].toString(),
+    refLeaf: leafValues.map((v) => v.toString()),
+    refSiblings,
+    refPathBits,
+    refIsActive,
+  };
+}
+
 describe('ProverService — policy enforcement (real Groth16 proofs)', () => {
   let service: ProverService;
+  let poseidon: any;
   let cred: ReturnType<typeof buildCredProof>;
   const credHash = credHashOf('MED-LIC-2024-001');
 
   beforeAll(async () => {
     service = new ProverService();
     await service.onModuleInit();
-    const poseidon = await buildPoseidon();
+    poseidon = await buildPoseidon();
     cred = buildCredProof(poseidon, credHash);
   });
 
   // A baseline request where every policy passes; tests override single fields.
-  const baseReq = (overrides: Record<string, unknown> = {}) => ({
-    doctorCredentialUal: 'urn:doctor:wilson',
-    doctorCredentialHash: credHash.toString(),
-    ...cred,
-    patientId: PATIENT,
-    drugIds: [METFORMIN],
-    dosages: ['8'],
-    patientAge: 40,
-    workflowId: 77,
-    allergies: [] as string[],
-    labResults: [] as unknown[],
-    policies: [] as unknown[],
-    ...overrides,
-  });
+  // The MFSSIA patient-record proof is derived from the (possibly overridden) allergies.
+  const baseReq = (overrides: Record<string, unknown> = {}) => {
+    const req: Record<string, unknown> = {
+      doctorCredentialUal: 'urn:doctor:wilson',
+      doctorCredentialHash: credHash.toString(),
+      ...cred,
+      patientId: PATIENT,
+      drugIds: [METFORMIN],
+      dosages: ['8'],
+      patientAge: 40,
+      workflowId: 77,
+      allergies: [] as string[],
+      labResults: [] as unknown[],
+      policies: [] as unknown[],
+      ...overrides,
+    };
+    const record = buildPatientRecord(poseidon, req.patientId as string, req.allergies as string[]);
+    return { ...req, ...record };
+  };
 
   it('baseline: registered doctor, no conflicts → PASS', async () => {
     const r = await service.prove(baseReq());

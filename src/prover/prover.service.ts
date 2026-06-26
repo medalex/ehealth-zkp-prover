@@ -138,36 +138,6 @@ export class ProverService implements OnModuleInit {
     return m ? m[0] : '0';
   }
 
-  // Builds a Poseidon Merkle tree of depth MERKLE_DEPTH (8 leaves)
-  private buildMerkleTree(leaves: bigint[]): { root: bigint; tree: bigint[][] } {
-    const size = 1 << MERKLE_DEPTH;
-    const padded = Array.from({ length: size }, (_, i) => i < leaves.length ? leaves[i] : 0n);
-    const tree: bigint[][] = [padded];
-    for (let d = 0; d < MERKLE_DEPTH; d++) {
-      const cur = tree[d];
-      const next: bigint[] = [];
-      for (let i = 0; i < cur.length; i += 2) {
-        next.push(this.poseidonHash([cur[i], cur[i + 1]]));
-      }
-      tree.push(next);
-    }
-    return { root: tree[MERKLE_DEPTH][0], tree };
-  }
-
-  // Returns a Merkle membership proof for the leaf at leafIdx
-  private getMerkleProof(tree: bigint[][], leafIdx: number): { siblings: string[]; pathBits: number[] } {
-    const siblings: string[] = [];
-    const pathBits: number[] = [];
-    let idx = leafIdx;
-    for (let d = 0; d < MERKLE_DEPTH; d++) {
-      const sibIdx = idx % 2 === 0 ? idx + 1 : idx - 1;
-      siblings.push(tree[d][sibIdx].toString());
-      pathBits.push(idx % 2); // 0 = left child, 1 = right
-      idx = Math.floor(idx / 2);
-    }
-    return { siblings, pathBits };
-  }
-
   // Transforms high-level hospital-api request into circuit-level inputs
   private buildHighLevelInput(req: HighLevelRequest, nonce: string): Record<string, unknown> {
     const allergies = req.allergies ?? [];
@@ -194,15 +164,6 @@ export class ProverService implements OnModuleInit {
       return m;
     };
 
-    // Per-patient leaf binding (shared contract with MFSSIA patient-record registry):
-    //   leaf = Poseidon(stringToField(patientId), substanceCode)
-    const patientField = this.stringToField((req.patientId ?? '').toLowerCase());
-    const leafFor = (substance: string): bigint => {
-      const substIdx = SUBSTANCE_IDX[substance] ?? -1;
-      const code = substIdx >= 0 ? BigInt(substIdx + 1) : this.stringToField(substance);
-      return this.poseidonHash([patientField, code]);
-    };
-
     // Physician credential: root + proof come from MFSSIA (required).
     if (!req.validCredentialRoot || !req.credentialSiblings || !req.credentialPathBits) {
       throw new Error('validCredentialRoot, credentialSiblings and credentialPathBits are required — fetch them from MFSSIA physician registry');
@@ -211,35 +172,18 @@ export class ProverService implements OnModuleInit {
     const credSiblings = req.credentialSiblings;
     const credPathBits = req.credentialPathBits.map(String);
 
-    // Patient allergy record: prefer the MFSSIA-anchored proof (built from DKG allergies,
-    // leaf bound to patientId); fall back to building it locally from the supplied list.
-    let patientRecordRoot: string;
-    let refLeaf: string[];
-    let refSiblings: string[][];
-    let refPathBitsArr: number[][];
-    let refIsActive: number[];
-    let allergyMatrix: number[][];
-
-    if (req.patientRecordRoot && req.refLeaf && req.refSiblings && req.refPathBits && req.refIsActive) {
-      patientRecordRoot = req.patientRecordRoot;
-      refLeaf = req.refLeaf;
-      refSiblings = req.refSiblings;
-      refPathBitsArr = req.refPathBits;
-      refIsActive = req.refIsActive;
-      allergyMatrix = buildAllergyMatrix(req.substances ?? allergies);
-    } else {
-      refIsActive = Array.from({ length: N_max }, (_, i) => (i < allergies.length ? 1 : 0));
-      const refLeafValues: bigint[] = [];
-      for (let i = 0; i < N_max; i++) {
-        refLeafValues.push(i < allergies.length ? leafFor(allergies[i]) : 0n);
-      }
-      const { root, tree } = this.buildMerkleTree(refLeafValues);
-      patientRecordRoot = root.toString();
-      refLeaf = refLeafValues.map(String);
-      refSiblings = refLeafValues.map((_, i) => refIsActive[i] ? this.getMerkleProof(tree, i).siblings : new Array(MERKLE_DEPTH).fill('0'));
-      refPathBitsArr = refLeafValues.map((_, i) => refIsActive[i] ? this.getMerkleProof(tree, i).pathBits : new Array(MERKLE_DEPTH).fill(0));
-      allergyMatrix = buildAllergyMatrix(allergies);
+    // Patient allergy record: root + Merkle proof come from the MFSSIA patient-record
+    // registry (built from DKG allergies, leaf bound to patientId). Required — MFSSIA is
+    // the authoritative source; the prover does not fabricate the patient record locally.
+    if (!req.patientRecordRoot || !req.refLeaf || !req.refSiblings || !req.refPathBits || !req.refIsActive) {
+      throw new Error('patientRecordRoot, refLeaf, refSiblings, refPathBits and refIsActive are required — fetch them from the MFSSIA patient-record registry');
     }
+    const patientRecordRoot = req.patientRecordRoot;
+    const refLeaf = req.refLeaf;
+    const refSiblings = req.refSiblings;
+    const refPathBitsArr = req.refPathBits;
+    const refIsActive = req.refIsActive;
+    const allergyMatrix = buildAllergyMatrix(req.substances ?? allergies);
 
     // Dosages: extract numeric part ("500mg" → "500")
     const prescribedDosages = (req.dosages ?? []).slice(0, N_PRESC).map(d => this.parseDosage(d));
