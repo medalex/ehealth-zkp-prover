@@ -177,6 +177,47 @@ function buildContraindication(poseidon: any, allergies: string[], prescribedDru
   return { contraindicationRoot: tree[CONTRA_DEPTH][0].toString(), contraProofs };
 }
 
+// Mirrors the MFSSIA lab-record registry: per-patient lab Merkle tree with
+// leaf = Poseidon(stringToField(patientId), stringToField(metric), floor(value)), depth 3.
+const LAB_DEPTH = 3;
+function buildLabRecord(
+  poseidon: any,
+  patientId: string,
+  labResults: { metric: string; value: number; measuredAt: string }[],
+) {
+  const F = poseidon.F;
+  const ph = (arr: bigint[]) => F.toObject(poseidon(arr));
+  const patientField = credHashOf(patientId.toLowerCase());
+  const size = 1 << LAB_DEPTH;
+  const metricIds = labResults.map((m) => credHashOf(m.metric.toLowerCase().trim()));
+  const values = labResults.map((m) => BigInt(Math.floor(m.value)));
+  const leaves: bigint[] = Array.from({ length: size }, (_, i) =>
+    i < labResults.length ? ph([patientField, metricIds[i], values[i]]) : 0n);
+
+  const tree: bigint[][] = [leaves];
+  for (let d = 0; d < LAB_DEPTH; d++) {
+    const cur = tree[d];
+    const next: bigint[] = [];
+    for (let i = 0; i < cur.length; i += 2) next.push(ph([cur[i], cur[i + 1]]));
+    tree.push(next);
+  }
+
+  const enriched = labResults.map((m, i) => {
+    const siblings: string[] = [];
+    const pathBits: number[] = [];
+    let idx = i;
+    for (let d = 0; d < LAB_DEPTH; d++) {
+      const si = idx % 2 === 0 ? idx + 1 : idx - 1;
+      siblings.push(tree[d][si].toString());
+      pathBits.push(idx % 2);
+      idx = Math.floor(idx / 2);
+    }
+    return { ...m, metricId: metricIds[i].toString(), siblings, pathBits };
+  });
+
+  return { labRecordRoot: tree[LAB_DEPTH][0].toString(), labResults: enriched };
+}
+
 describe('ProverService — policy enforcement (real Groth16 proofs)', () => {
   let service: ProverService;
   let poseidon: any;
@@ -213,7 +254,12 @@ describe('ProverService — policy enforcement (real Groth16 proofs)', () => {
       req.allergies as string[],
       (req.drugIds as number[])[0],
     );
-    return { ...req, ...record, ...contra };
+    const lab = buildLabRecord(
+      poseidon,
+      req.patientId as string,
+      req.labResults as { metric: string; value: number; measuredAt: string }[],
+    );
+    return { ...req, ...record, ...contra, labRecordRoot: lab.labRecordRoot, labResults: lab.labResults };
   };
 
   it('baseline: registered doctor, no conflicts → PASS', async () => {

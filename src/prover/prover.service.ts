@@ -94,7 +94,9 @@ interface HighLevelRequest {
   // (substanceId, prescribedDrug) → value. Aligned with substances order.
   contraindicationRoot?: string;
   contraProofs?: { value: number; siblings: string[]; pathBits: number[] }[];
-  labResults: { metric?: string; loincCode?: string; value?: number; measuredAt?: string }[];
+  // MFSSIA lab-record proof: root + per-measurement membership (leaf bound to patient + metric).
+  labRecordRoot?: string;
+  labResults: { metric?: string; value?: number; measuredAt?: string; metricId?: string; siblings?: string[]; pathBits?: number[] }[];
   policies: { medicationCode: string; clinicalCondition: string; comparisonOperator: string; threshold: number; deltaMax?: number }[];
 }
 
@@ -224,12 +226,19 @@ export class ProverService implements OnModuleInit {
     // Lab-based clinical policies (P6) — eGFR etc.
     // A slot is activated only when the patient has a matching lab measurement;
     // missing measurement → slot inactive → no block (cannot evaluate).
+    if (!req.labRecordRoot) {
+      throw new Error('labRecordRoot is required — fetch it from the MFSSIA lab-record registry');
+    }
+    const labRecordRoot = req.labRecordRoot;
     const labResults = req.labResults ?? [];
     const labThreshold = new Array(N_LAB).fill('0');
     const labRequiredOp = new Array(N_LAB).fill('0');
     const labAppliesToDrug = new Array(N_LAB).fill('0');
     const labValue = new Array(N_LAB).fill('0');
     const labIsActive = new Array(N_LAB).fill('0');
+    const labMetricId = new Array(N_LAB).fill('0');
+    const labRecordSiblings: string[][] = new Array(N_LAB).fill(null).map(() => new Array(MERKLE_DEPTH).fill('0'));
+    const labRecordPathBits: number[][] = new Array(N_LAB).fill(null).map(() => new Array(MERKLE_DEPTH).fill(0));
 
     let labSlot = 0;
     for (const p of req.policies ?? []) {
@@ -249,6 +258,10 @@ export class ProverService implements OnModuleInit {
       labAppliesToDrug[labSlot] = String(drugId);
       labValue[labSlot]         = String(Math.floor(Number(lr.value ?? 0)));
       labIsActive[labSlot]      = '1';
+      // Lab-record membership for this measurement (from MFSSIA lab-record proof).
+      labMetricId[labSlot]      = String(lr.metricId ?? '0');
+      if (lr.siblings) labRecordSiblings[labSlot] = lr.siblings;
+      if (lr.pathBits) labRecordPathBits[labSlot] = lr.pathBits;
       labSlot++;
     }
 
@@ -299,6 +312,10 @@ export class ProverService implements OnModuleInit {
       labThreshold,
       labRequiredOp,
       labAppliesToDrug,
+      labRecordRoot,
+      labMetricId,
+      labRecordSiblings,
+      labRecordPathBits: labRecordPathBits.map(row => row.map(String)),
     };
   }
 
@@ -335,6 +352,10 @@ export class ProverService implements OnModuleInit {
       labThreshold: dto.labThreshold,
       labRequiredOp: dto.labRequiredOp.map(String),
       labAppliesToDrug: dto.labAppliesToDrug,
+      labRecordRoot: dto.labRecordRoot,
+      labMetricId: dto.labMetricId,
+      labRecordSiblings: dto.labRecordSiblings.map(row => row.map(String)),
+      labRecordPathBits: dto.labRecordPathBits.map(row => row.map(String)),
     };
   }
 

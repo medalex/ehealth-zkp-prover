@@ -56,4 +56,10 @@ export class ProveRequestDto {
   labThreshold: string[];
   labRequiredOp: number[];
   labAppliesToDrug: string[];
+
+  // Lab-record membership (MFSSIA → DKG): leaf = Poseidon(patientField, labMetricId[L], labValue[L])
+  labRecordRoot: string;
+  labMetricId: string[];          // N_LAB
+  labRecordSiblings: string[][];  // N_LAB × LAB_DEPTH
+  labRecordPathBits: number[][];  // N_LAB × LAB_DEPTH
 }

@@ -157,7 +157,8 @@ template PoseidonMerkleProof(depth) {
 // MERKLE_DEPTH — Merkle tree depth.
 // N_LAB        — max number of lab-based clinical policy slots (eGFR etc.).
 // CONTRA_DEPTH — depth of the committed contraindication-closure Merkle tree.
-template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH, N_LAB, CONTRA_DEPTH) {
+// LAB_DEPTH    — depth of the per-patient lab-record Merkle tree.
+template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH, N_LAB, CONTRA_DEPTH, LAB_DEPTH) {
 
     // ── Private inputs ──────────────────────────────────────────────────────────
 
@@ -182,6 +183,11 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH, N
     // labIsActive[L] — 1 = slot in use, 0 = padding (passes tautologically)
     signal input labValue[N_LAB];
     signal input labIsActive[N_LAB];
+    // Lab-record membership: each active measurement is bound to the patient's DKG lab
+    // record — leaf = Poseidon(patientField, labMetricId[L], labValue[L]) ∈ labRecordRoot.
+    signal input labMetricId[N_LAB];
+    signal input labRecordSiblings[N_LAB][LAB_DEPTH];
+    signal input labRecordPathBits[N_LAB][LAB_DEPTH];
 
     // N_max patient record reference slots (allergies etc.)
     // refLeaf[i]     = Poseidon(recordId, recordType, substanceId, ...)
@@ -213,6 +219,8 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH, N
     signal input adultMaxDosages[N_DRUGS];
     // contraindicationRoot — governance contraindication-closure root (MFSSIA → DKG)
     signal input contraindicationRoot;
+    // labRecordRoot — per-patient lab-record root (MFSSIA → DKG)
+    signal input labRecordRoot;
 
     // Lab policy parameters from DKG (governance-approved, PUBLIC)
     // labThreshold[L]     — clinical threshold value (e.g. 30 for eGFR)
@@ -400,9 +408,29 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH, N
     signal labNoBlock[N_LAB];
     component allLabOk = AndN(N_LAB);
 
+    component labLeaf[N_LAB];
+    component labRecProof[N_LAB];
+    signal labRecActiveValid[N_LAB];
+
     for (var L = 0; L < N_LAB; L++) {
         labActiveBool[L] = ForceBool();
         labActiveBool[L].in <== labIsActive[L];
+
+        // Lab-record membership: an active measurement must belong to the patient's
+        // DKG lab record — leaf = Poseidon(patientField, labMetricId, labValue).
+        labLeaf[L] = Poseidon(3);
+        labLeaf[L].inputs[0] <== patientField;
+        labLeaf[L].inputs[1] <== labMetricId[L];
+        labLeaf[L].inputs[2] <== labValue[L];
+        labRecProof[L] = PoseidonMerkleProof(LAB_DEPTH);
+        labRecProof[L].leaf         <== labLeaf[L].out;
+        labRecProof[L].expectedRoot <== labRecordRoot;
+        for (var d = 0; d < LAB_DEPTH; d++) {
+            labRecProof[L].siblings[d] <== labRecordSiblings[L][d];
+            labRecProof[L].pathBits[d] <== labRecordPathBits[L][d];
+        }
+        labRecActiveValid[L] <== labIsActive[L] * labRecProof[L].valid;
+        labIsActive[L] === labRecActiveValid[L];
 
         // value < threshold
         labLt[L] = LessThan(BITLEN);
@@ -473,8 +501,9 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH, N
 // stmtHash and outcome are circuit outputs and are always public.
 // substanceId, contraValue and labValue are PRIVATE — the verifier sees only the
 // outcome and the committed roots, not patient allergy/lab data.
-// contraindicationRoot binds P2 to the governance contraindication closure in DKG.
-// nPublic = 2 outputs + 17 public inputs = 19.
+// contraindicationRoot binds P2 to the governance contraindication closure in DKG;
+// labRecordRoot binds P6 lab values to the patient's DKG lab record.
+// nPublic = 2 outputs + 18 public inputs = 20.
 component main {public [
     doctorCredentialHash,
     validCredentialRoot,
@@ -485,5 +514,6 @@ component main {public [
     labThreshold,
     labRequiredOp,
     labAppliesToDrug,
-    contraindicationRoot
-]} = PrescriptionValidation(3, 3, 1, 32, 3, 2, 4);
+    contraindicationRoot,
+    labRecordRoot
+]} = PrescriptionValidation(3, 3, 1, 32, 3, 2, 4, 3);
