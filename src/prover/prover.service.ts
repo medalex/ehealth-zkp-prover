@@ -95,7 +95,7 @@ interface HighLevelRequest {
   contraindicationRoot?: string;
   contraProofs?: { value: number; siblings: string[]; pathBits: number[] }[];
   labResults: { metric?: string; loincCode?: string; value?: number; measuredAt?: string }[];
-  policies: { medicationCode: string; clinicalCondition: string; comparisonOperator: string; threshold: number }[];
+  policies: { medicationCode: string; clinicalCondition: string; comparisonOperator: string; threshold: number; deltaMax?: number }[];
 }
 
 @Injectable()
@@ -255,6 +255,18 @@ export class ProverService implements OnModuleInit {
     const nowSec = Math.floor(Date.now() / 1000);
     const issuedAt = req.prescriptionIssuedAt ?? nowSec;
 
+    // Prescription validity window (P4 TimeValid) from DKG governance (deltaMax) for the
+    // prescribed drug, falling back to 7 days when no policy specifies one.
+    const prescribedId = (req.drugIds ?? [])[0];
+    const drugName = Object.keys(DRUG_ID).find(k => DRUG_ID[k] === prescribedId);
+    let validFor = '604800'; // 7 days default
+    for (const p of req.policies ?? []) {
+      if (drugName && (p.medicationCode ?? '').toLowerCase().includes(drugName) && p.deltaMax) {
+        validFor = String(Math.floor(Number(p.deltaMax)));
+        break;
+      }
+    }
+
     return {
       doctorCredentialHash: doctorCredentialHash.toString(),
       validCredentialRoot,
@@ -274,7 +286,7 @@ export class ProverService implements OnModuleInit {
       prescribedDosages,
       patientAge: String(req.patientAge ?? 0),
       prescriptionTimestamp: String(issuedAt),
-      validFor: '604800',   // 7 days in seconds
+      validFor,   // from DKG governance deltaMax (default 7 days)
       currentTimestamp: String(nowSec),
       workflowId: String(req.workflowId ?? 0),
       childMaxDosages: childMax,
@@ -388,4 +400,3 @@ export class ProverService implements OnModuleInit {
 
 // Exported for hospital-api and pharmacy-api when parsing publicSignals
 export { N_DRUGS, N_max, N_PRESC, MERKLE_DEPTH };
-// Amoxicillin (drugId 107, idx 2) is blocked by Penicillin allergy via β-lactam class subsumption
