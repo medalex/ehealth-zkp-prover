@@ -128,6 +128,55 @@ function buildPatientRecord(poseidon: any, patientId: string, allergies: string[
   };
 }
 
+// Mirrors the MFSSIA contraindication registry: closure tree with
+// leaf = Poseidon(substanceId, realDrugId, value), depth 4.
+const CONTRA_DEPTH = 4;
+const DRUG_IDS = [105, 103, 107]; // index 0=Metformin,1=Penicillin,2=Amoxicillin
+const CONTRA = [
+  [1, 0, 0],
+  [0, 1, 1],
+  [0, 1, 1],
+];
+
+// Builds the contraindication-closure proof for the patient's allergies vs the prescribed drug.
+function buildContraindication(poseidon: any, allergies: string[], prescribedDrugId: number) {
+  const F = poseidon.F;
+  const ph = (arr: bigint[]) => F.toObject(poseidon(arr));
+  const size = 1 << CONTRA_DEPTH;
+  const leaves: bigint[] = Array.from({ length: size }, () => 0n);
+  for (let s = 0; s < 3; s++) {
+    for (let d = 0; d < 3; d++) {
+      leaves[s * 3 + d] = ph([BigInt(s), BigInt(DRUG_IDS[d]), BigInt(CONTRA[s][d])]);
+    }
+  }
+  const tree: bigint[][] = [leaves];
+  for (let depth = 0; depth < CONTRA_DEPTH; depth++) {
+    const cur = tree[depth];
+    const next: bigint[] = [];
+    for (let i = 0; i < cur.length; i += 2) next.push(ph([cur[i], cur[i + 1]]));
+    tree.push(next);
+  }
+
+  const drugIndex = DRUG_IDS.indexOf(prescribedDrugId);
+  const active = allergies.slice(0, 3);
+  const contraProofs = active.map((subst) => {
+    const s = SUBSTANCE_IDX[subst.toLowerCase()] ?? 0;
+    const value = drugIndex >= 0 ? CONTRA[s][drugIndex] : 0;
+    const siblings: string[] = [];
+    const pathBits: number[] = [];
+    let idx = s * 3 + drugIndex;
+    for (let d = 0; d < CONTRA_DEPTH; d++) {
+      const si = idx % 2 === 0 ? idx + 1 : idx - 1;
+      siblings.push(tree[d][si].toString());
+      pathBits.push(idx % 2);
+      idx = Math.floor(idx / 2);
+    }
+    return { value, siblings, pathBits };
+  });
+
+  return { contraindicationRoot: tree[CONTRA_DEPTH][0].toString(), contraProofs };
+}
+
 describe('ProverService — policy enforcement (real Groth16 proofs)', () => {
   let service: ProverService;
   let poseidon: any;
@@ -159,7 +208,12 @@ describe('ProverService — policy enforcement (real Groth16 proofs)', () => {
       ...overrides,
     };
     const record = buildPatientRecord(poseidon, req.patientId as string, req.allergies as string[]);
-    return { ...req, ...record };
+    const contra = buildContraindication(
+      poseidon,
+      req.allergies as string[],
+      (req.drugIds as number[])[0],
+    );
+    return { ...req, ...record, ...contra };
   };
 
   it('baseline: registered doctor, no conflicts → PASS', async () => {

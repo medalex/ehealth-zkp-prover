@@ -156,7 +156,8 @@ template PoseidonMerkleProof(depth) {
 // BITLEN       — bit width for range checks.
 // MERKLE_DEPTH — Merkle tree depth.
 // N_LAB        — max number of lab-based clinical policy slots (eGFR etc.).
-template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH, N_LAB) {
+// CONTRA_DEPTH — depth of the committed contraindication-closure Merkle tree.
+template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH, N_LAB, CONTRA_DEPTH) {
 
     // ── Private inputs ──────────────────────────────────────────────────────────
 
@@ -191,6 +192,16 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH, N
     signal input refPathBits[N_max][MERKLE_DEPTH];
     signal input refIsActive[N_max];
 
+    // Committed contraindication: substanceId is bound to refLeaf, and the contraindication
+    // value comes from the governance closure (MFSSIA → DKG).
+    // refLeaf[i]      = Poseidon(patientField, substanceId[i] + 1)
+    // contra leaf     = Poseidon(substanceId[i], prescribedDrug, contraValue[i]) ∈ contraindicationRoot
+    signal input patientField;
+    signal input substanceId[N_max];
+    signal input contraValue[N_max];
+    signal input contraSiblings[N_max][CONTRA_DEPTH];
+    signal input contraPathBits[N_max][CONTRA_DEPTH];
+
     // ── Public inputs ───────────────────────────────────────────────────────────
 
     // validCredentialRoot — physician registry root (MFSSIA → DKG, external, pre-committed)
@@ -200,8 +211,8 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH, N
     signal input nonce;
     signal input policyDrugIds[N_DRUGS];
     signal input adultMaxDosages[N_DRUGS];
-    // allergyMatrix[i][j] = 1 if allergen from slot i contraindicates drug j
-    signal input allergyMatrix[N_max][N_DRUGS];
+    // contraindicationRoot — governance contraindication-closure root (MFSSIA → DKG)
+    signal input contraindicationRoot;
 
     // Lab policy parameters from DKG (governance-approved, PUBLIC)
     // labThreshold[L]     — clinical threshold value (e.g. 30 for eGFR)
@@ -227,18 +238,31 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH, N
     }
     policy1 <== credProof.valid;
 
-    // ── Merkle proofs for N_max reference slots ─────────────────────────────────
-    // An active slot (refIsActive=1) must have a valid proof against root_M.
-    // An inactive slot (refIsActive=0) — no proof constraint.
+    // ── Merkle proofs + committed contraindication for N_max reference slots ──────
+    // Each active allergy slot (refIsActive=1) must:
+    //   (1) be a valid member of patientRecordRoot (the patient's DKG allergy record);
+    //   (2) bind substanceId to that leaf: refLeaf = Poseidon(patientField, substanceId+1);
+    //   (3) carry a contraindication value from the committed closure:
+    //       Poseidon(substanceId, prescribedDrug, contraValue) ∈ contraindicationRoot.
+    // The prover cannot fake the contraindication — only the committed value's leaf exists.
     component refProof[N_max];
     component refActiveBool[N_max];
-    component allergyBool[N_max][N_DRUGS];
     signal activeAndValid[N_max];
+
+    component substLeaf[N_max];
+    component contraValBool[N_max];
+    component contraLeaf[N_max];
+    component contraProof[N_max];
+    signal contraActiveValid[N_max];
+
+    signal conflict[N_max];
+    signal noConflictRow[N_max];
 
     for (var i = 0; i < N_max; i++) {
         refActiveBool[i] = ForceBool();
         refActiveBool[i].in <== refIsActive[i];
 
+        // (1) Patient-record membership.
         refProof[i] = PoseidonMerkleProof(MERKLE_DEPTH);
         refProof[i].leaf         <== refLeaf[i];
         refProof[i].expectedRoot <== patientRecordRoot;
@@ -246,25 +270,46 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH, N
             refProof[i].siblings[d] <== refSiblings[i][d];
             refProof[i].pathBits[d] <== refPathBits[i][d];
         }
-
-        // refIsActive[i] === refIsActive[i] * refProof[i].valid
-        // ⟹ when refIsActive=1 we require valid=1; when refIsActive=0 — no constraint.
         activeAndValid[i] <== refIsActive[i] * refProof[i].valid;
         refIsActive[i] === activeAndValid[i];
 
-        for (var j = 0; j < N_DRUGS; j++) {
-            allergyBool[i][j] = ForceBool();
-            allergyBool[i][j].in <== allergyMatrix[i][j];
+        // (2) Bind substanceId to the committed patient-record leaf.
+        substLeaf[i] = Poseidon(2);
+        substLeaf[i].inputs[0] <== patientField;
+        substLeaf[i].inputs[1] <== substanceId[i] + 1;
+        refIsActive[i] * (refLeaf[i] - substLeaf[i].out) === 0;
+
+        // (3) Contraindication value drawn from the committed closure.
+        contraValBool[i] = ForceBool();
+        contraValBool[i].in <== contraValue[i];
+
+        contraLeaf[i] = Poseidon(3);
+        contraLeaf[i].inputs[0] <== substanceId[i];
+        contraLeaf[i].inputs[1] <== prescribedDrugIds[0];
+        contraLeaf[i].inputs[2] <== contraValue[i];
+
+        contraProof[i] = PoseidonMerkleProof(CONTRA_DEPTH);
+        contraProof[i].leaf         <== contraLeaf[i].out;
+        contraProof[i].expectedRoot <== contraindicationRoot;
+        for (var d = 0; d < CONTRA_DEPTH; d++) {
+            contraProof[i].siblings[d] <== contraSiblings[i][d];
+            contraProof[i].pathBits[d] <== contraPathBits[i][d];
         }
+        contraActiveValid[i] <== refIsActive[i] * contraProof[i].valid;
+        refIsActive[i] === contraActiveValid[i];
+
+        // Active slot contributes its committed contraindication; inactive → no conflict.
+        conflict[i] <== refIsActive[i] * contraValue[i];
+        noConflictRow[i] <== 1 - conflict[i];
     }
 
-    // ── Policy 2: NoContraindication — no allergy to prescribed drug ────────────
+    // ── Policy 2: NoContraindication — committed closure shows no conflict ────────
     signal policy2;
-    component rowSel[N_PRESC][N_max];
-    signal activeAllergyConflict[N_PRESC][N_max];
-    signal noConflictRow[N_PRESC][N_max];
-    signal noAllergyPerRx[N_PRESC];
-    component allNoConflict[N_PRESC];
+    component allNoConflict = AndN(N_max);
+    for (var i4 = 0; i4 < N_max; i4++) {
+        allNoConflict.in[i4] <== noConflictRow[i4];
+    }
+    policy2 <== allNoConflict.out;
 
     // ── Policy 3: DosageOk — dosage within permitted limits ─────────────────────
     signal policy3;
@@ -292,25 +337,6 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH, N
             adultSel[p].values[i1] <== adultMaxDosages[i1];
         }
 
-        for (var i2 = 0; i2 < N_max; i2++) {
-            rowSel[p][i2] = SelectValue(N_DRUGS);
-            rowSel[p][i2].key <== prescribedDrugIds[p];
-            for (var j2 = 0; j2 < N_DRUGS; j2++) {
-                rowSel[p][i2].keys[j2]   <== policyDrugIds[j2];
-                rowSel[p][i2].values[j2] <== allergyMatrix[i2][j2];
-            }
-            // Active slot: allergy record is applied.
-            // Inactive slot (padding): no conflict tautologically.
-            activeAllergyConflict[p][i2] <== refIsActive[i2] * rowSel[p][i2].selected;
-            noConflictRow[p][i2] <== 1 - activeAllergyConflict[p][i2];
-        }
-
-        allNoConflict[p] = AndN(N_max);
-        for (var i3 = 0; i3 < N_max; i3++) {
-            allNoConflict[p].in[i3] <== noConflictRow[p][i3];
-        }
-        noAllergyPerRx[p] <== allNoConflict[p].out;
-
         leChild[p] = LessEqThan(BITLEN);
         leAdult[p] = LessEqThan(BITLEN);
 
@@ -323,13 +349,10 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH, N
         dosageOkPerRx[p] <== leAdult[p].out + ageIsChild.out * (leChild[p].out - leAdult[p].out);
     }
 
-    component allP2 = AndN(N_PRESC);
     component allP3 = AndN(N_PRESC);
     for (var p2 = 0; p2 < N_PRESC; p2++) {
-        allP2.in[p2] <== noAllergyPerRx[p2];
         allP3.in[p2] <== dosageOkPerRx[p2];
     }
-    policy2 <== allP2.out;
     policy3 <== allP3.out;
 
     // ── Policy 4: TimeValid — prescription is still valid ───────────────────────
@@ -448,10 +471,10 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH, N
 //   - policy parameters T   (policyDrugIds, adultMaxDosages, lab policy params)
 //   - specific prescription  (stmtHash, nonce)
 // stmtHash and outcome are circuit outputs and are always public.
-// allergyMatrix and labValue are PRIVATE — the verifier sees only the outcome,
-// not patient allergy data or lab measurements.
-// Public signals: 2 outputs + 6 base inputs + 3·N_LAB lab params.
-// With N_LAB=2: 2 + 6 + 6 = 14... (policyDrugIds[3]+adultMaxDosages[3] expand) → nPublic 18.
+// substanceId, contraValue and labValue are PRIVATE — the verifier sees only the
+// outcome and the committed roots, not patient allergy/lab data.
+// contraindicationRoot binds P2 to the governance contraindication closure in DKG.
+// nPublic = 2 outputs + 17 public inputs = 19.
 component main {public [
     doctorCredentialHash,
     validCredentialRoot,
@@ -461,5 +484,6 @@ component main {public [
     adultMaxDosages,
     labThreshold,
     labRequiredOp,
-    labAppliesToDrug
-]} = PrescriptionValidation(3, 3, 1, 32, 3, 2);
+    labAppliesToDrug,
+    contraindicationRoot
+]} = PrescriptionValidation(3, 3, 1, 32, 3, 2, 4);

@@ -13,10 +13,19 @@ export class ProveRequestDto {
   prescribedDosages: string[];    // N_PRESC dosage values
 
   // Policy parameters T from DKG (governance-approved)
-  policyDrugIds: string[];        // N_DRUGS drug identifiers covered by policy parameters (dosage limits, allergy rows)
-  allergyMatrix: number[][];      // N_max × N_DRUGS: allergyMatrix[i][j]=1 if slot i contraindicates drug j
+  policyDrugIds: string[];        // N_DRUGS drug identifiers covered by policy parameters (dosage limits)
   adultMaxDosages: string[];      // N_DRUGS max dosages for adults (age >= 11)
   childMaxDosages: string[];      // N_DRUGS max dosages for children (age < 11)
+
+  // Committed contraindication closure (MFSSIA → DKG). Per active slot:
+  //   refLeaf[i] = Poseidon(patientField, substanceId[i]+1)  (binds substance to the record)
+  //   contra leaf = Poseidon(substanceId[i], prescribedDrug, contraValue[i]) ∈ contraindicationRoot
+  contraindicationRoot: string;   // governance closure Merkle root (PUBLIC)
+  patientField: string;           // stringToField(patientId) salt for record leaves
+  substanceId: number[];          // N_max substance ids (bound to refLeaf)
+  contraValue: number[];          // N_max contraindication values from the closure
+  contraSiblings: string[][];     // N_max × CONTRA_DEPTH membership siblings
+  contraPathBits: number[][];     // N_max × CONTRA_DEPTH membership path bits
 
   // Patient attributes
   patientAge: number;

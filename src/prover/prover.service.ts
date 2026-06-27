@@ -11,6 +11,7 @@ const N_DRUGS = 3;
 const N_max = 3;   // reference slot count; n_total ≈ n_cred + N_max·n_Merkle + |Pol|·n_range
 const N_PRESC = 1;
 const MERKLE_DEPTH = 3;
+const CONTRA_DEPTH = 4;   // contraindication-closure tree depth (matches the circuit)
 const N_LAB = 2;   // max lab-based clinical policy slots
 
 // medicationCode → drugId (must align with policyDrugIds)
@@ -42,20 +43,15 @@ const SUBSTANCE_IDX: Record<string, number> = {
   'Amoxicillin': 2, 'amoxicillin': 2,
 };
 
-// β-lactam class subsumption: Penicillin allergy also blocks Amoxicillin.
-// allergyMatrix[slot][j]=1 for each j in the blocked set.
-const ALLERGY_BLOCKS: Record<number, number[]> = {
-  1: [1, 2],  // Penicillin (idx=1) ⊑ β-lactam → blocks Penicillin + Amoxicillin
-  2: [1, 2],  // Amoxicillin (idx=2) ⊑ β-lactam → blocks the same class
-  0: [0],     // Metformin — separate class (biguanide)
-};
+// β-lactam subsumption (Penicillin allergy ⟹ Amoxicillin) now lives in the
+// MFSSIA contraindication closure committed in DKG, not in the prover.
 
 // Public signal indices (outputs first, then public inputs in declaration order):
 // outcome(0), stmtHash(1),
 // doctorCredentialHash(2), validCredentialRoot(3), patientRecordRoot(4), nonce(5),
-// policyDrugIds[3] → 6-8, adultMaxDosages[3] → 9-11,
-// labThreshold[2] → 12-13, labRequiredOp[2] → 14-15, labAppliesToDrug[2] → 16-17
-// allergyMatrix and labValue are PRIVATE — not visible in publicSignals
+// policyDrugIds[3] → 6-8, adultMaxDosages[3] → 9-11, contraindicationRoot → 12,
+// labThreshold[2] → 13-14, labRequiredOp[2] → 15-16, labAppliesToDrug[2] → 17-18
+// substanceId, contraValue and labValue are PRIVATE — not visible in publicSignals
 export const PUB = {
   outcome: 0,
   stmtHash: 1,
@@ -65,9 +61,10 @@ export const PUB = {
   nonce: 5,
   policyDrugIds: [6, 7, 8],
   adultMaxDosages: [9, 10, 11],
-  labThreshold: [12, 13],
-  labRequiredOp: [14, 15],
-  labAppliesToDrug: [16, 17],
+  contraindicationRoot: 12,
+  labThreshold: [13, 14],
+  labRequiredOp: [15, 16],
+  labAppliesToDrug: [17, 18],
 } as const;
 
 // High-level request from hospital-api (ASP.NET Core serializes to camelCase)
@@ -93,6 +90,10 @@ interface HighLevelRequest {
   refSiblings?: string[][];
   refPathBits?: number[][];
   refIsActive?: number[];
+  // MFSSIA contraindication-closure proof: root + per-active-slot membership for
+  // (substanceId, prescribedDrug) → value. Aligned with substances order.
+  contraindicationRoot?: string;
+  contraProofs?: { value: number; siblings: string[]; pathBits: number[] }[];
   labResults: { metric?: string; loincCode?: string; value?: number; measuredAt?: string }[];
   policies: { medicationCode: string; clinicalCondition: string; comparisonOperator: string; threshold: number }[];
 }
@@ -149,21 +150,6 @@ export class ProverService implements OnModuleInit {
       ? BigInt(req.doctorCredentialHash)
       : this.stringToField(req.doctorCredentialUal ?? '');
 
-    // Contraindication matrix from active allergy substances (β-lactam subsumption).
-    const buildAllergyMatrix = (subs: string[]): number[][] => {
-      const m: number[][] = [];
-      for (let i = 0; i < N_max; i++) {
-        const row = new Array(N_DRUGS).fill(0);
-        if (i < subs.length) {
-          const substIdx = SUBSTANCE_IDX[subs[i]] ?? -1;
-          const blocked = substIdx >= 0 ? (ALLERGY_BLOCKS[substIdx] ?? [substIdx]) : [];
-          for (const j of blocked) row[j] = 1;
-        }
-        m.push(row);
-      }
-      return m;
-    };
-
     // Physician credential: root + proof come from MFSSIA (required).
     if (!req.validCredentialRoot || !req.credentialSiblings || !req.credentialPathBits) {
       throw new Error('validCredentialRoot, credentialSiblings and credentialPathBits are required — fetch them from MFSSIA physician registry');
@@ -183,7 +169,34 @@ export class ProverService implements OnModuleInit {
     const refSiblings = req.refSiblings;
     const refPathBitsArr = req.refPathBits;
     const refIsActive = req.refIsActive;
-    const allergyMatrix = buildAllergyMatrix(req.substances ?? allergies);
+
+    // Committed contraindication: substanceId is bound to refLeaf, and the conflict value
+    // comes from the MFSSIA contraindication closure (required — not fabricated locally).
+    if (!req.contraindicationRoot || !req.contraProofs) {
+      throw new Error('contraindicationRoot and contraProofs are required — fetch them from the MFSSIA contraindication registry');
+    }
+    const contraindicationRoot = req.contraindicationRoot;
+    const patientField = this.stringToField((req.patientId ?? '').toLowerCase()).toString();
+    const subs = req.substances ?? allergies;
+    const substanceId: string[] = [];
+    const contraValue: string[] = [];
+    const contraSiblings: string[][] = [];
+    const contraPathBits: number[][] = [];
+    for (let i = 0; i < N_max; i++) {
+      const cp = req.contraProofs[i];
+      if (i < subs.length && cp) {
+        substanceId.push(String(SUBSTANCE_IDX[subs[i]] ?? 0));
+        contraValue.push(String(cp.value));
+        contraSiblings.push(cp.siblings);
+        contraPathBits.push(cp.pathBits);
+      } else {
+        // Inactive slot: refIsActive=0 leaves these unconstrained.
+        substanceId.push('0');
+        contraValue.push('0');
+        contraSiblings.push(new Array(CONTRA_DEPTH).fill('0'));
+        contraPathBits.push(new Array(CONTRA_DEPTH).fill(0));
+      }
+    }
 
     // Dosages: extract numeric part ("500mg" → "500")
     const prescribedDosages = (req.dosages ?? []).slice(0, N_PRESC).map(d => this.parseDosage(d));
@@ -248,7 +261,12 @@ export class ProverService implements OnModuleInit {
       patientRecordRoot,
       nonce,
       policyDrugIds,
-      allergyMatrix: allergyMatrix.map(row => row.map(String)),
+      contraindicationRoot,
+      patientField,
+      substanceId,
+      contraValue,
+      contraSiblings,
+      contraPathBits: contraPathBits.map(row => row.map(String)),
       adultMaxDosages: adultMax,
       credentialSiblings: credSiblings,
       credentialPathBits: credPathBits,
@@ -279,7 +297,12 @@ export class ProverService implements OnModuleInit {
       validCredentialRoot: dto.validCredentialRoot,
       nonce,
       policyDrugIds: dto.policyDrugIds,
-      allergyMatrix: dto.allergyMatrix.map(row => row.map(String)),
+      contraindicationRoot: dto.contraindicationRoot,
+      patientField: dto.patientField,
+      substanceId: dto.substanceId.map(String),
+      contraValue: dto.contraValue.map(String),
+      contraSiblings: dto.contraSiblings.map(row => row.map(String)),
+      contraPathBits: dto.contraPathBits.map(row => row.map(String)),
       adultMaxDosages: dto.adultMaxDosages,
       credentialSiblings: dto.credentialSiblings,
       credentialPathBits: dto.credentialPathBits.map(String),
