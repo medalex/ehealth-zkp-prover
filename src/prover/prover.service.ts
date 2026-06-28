@@ -50,7 +50,7 @@ const SUBSTANCE_IDX: Record<string, number> = {
 // outcome(0), stmtHash(1),
 // doctorCredentialHash(2), validCredentialRoot(3), patientRecordRoot(4), nonce(5),
 // policyDrugIds[3] → 6-8, adultMaxDosages[3] → 9-11, contraindicationRoot → 12,
-// labThreshold[2] → 13-14, labRequiredOp[2] → 15-16, labAppliesToDrug[2] → 17-18
+// labRecordRoot → 13, labThreshold[2] → 14-15, labRequiredOp[2] → 16-17, labAppliesToDrug[2] → 18-19
 // substanceId, contraValue and labValue are PRIVATE — not visible in publicSignals
 export const PUB = {
   outcome: 0,
@@ -62,9 +62,10 @@ export const PUB = {
   policyDrugIds: [6, 7, 8],
   adultMaxDosages: [9, 10, 11],
   contraindicationRoot: 12,
-  labThreshold: [13, 14],
-  labRequiredOp: [15, 16],
-  labAppliesToDrug: [17, 18],
+  labRecordRoot: 13,
+  labThreshold: [14, 15],
+  labRequiredOp: [16, 17],
+  labAppliesToDrug: [18, 19],
 } as const;
 
 // High-level request from hospital-api (ASP.NET Core serializes to camelCase)
