@@ -4,7 +4,6 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { buildPoseidon } from 'circomlibjs';
 import { ProveRequestDto } from './dto/prove-request.dto';
-import { VerifyRequestDto } from './dto/verify-request.dto';
 
 // Circuit sizes — must match the compiled circom artifact.
 const N_DRUGS = 3;
@@ -121,7 +120,7 @@ export class ProverService implements OnModuleInit {
       console.warn(
         '[ZKP Prover] Circuit artifacts not found in', this.circuitsDir,
         '— run the trusted setup first (see scripts/setup.sh).',
-        '/prove and /verify will return 503 until artifacts are present.',
+        '/prove will return 503 until artifacts are present.',
       );
     }
   }
@@ -406,18 +405,6 @@ export class ProverService implements OnModuleInit {
     };
   }
 
-  async verify(dto: VerifyRequestDto) {
-    this.assertArtifacts();
-
-    const snarkjs = await import('snarkjs');
-    const valid = await snarkjs.groth16.verify(
-      this.verificationKey!,
-      dto.publicSignals,
-      dto.proof,
-    );
-
-    return { valid };
-  }
 }
 
 // Exported for hospital-api and pharmacy-api when parsing publicSignals
