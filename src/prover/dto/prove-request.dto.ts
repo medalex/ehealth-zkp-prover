@@ -14,8 +14,7 @@ export class ProveRequestDto {
 
   // Policy parameters T from DKG (governance-approved)
   policyDrugIds: string[];        // N_DRUGS drug identifiers covered by policy parameters (dosage limits)
-  adultMaxDosages: string[];      // N_DRUGS max dosages for adults (age >= 11)
-  childMaxDosages: string[];      // N_DRUGS max dosages for children (age < 11)
+  maxDosages: string[];           // N_DRUGS governance-approved max dosages per drug
 
   // Committed contraindication closure (MFSSIA → DKG). Per active slot:
   //   refLeaf[i] = Poseidon(patientField, substanceId[i]+1)  (binds substance to the record)
@@ -27,13 +26,10 @@ export class ProveRequestDto {
   contraSiblings: string[][];     // N_max × CONTRA_DEPTH membership siblings
   contraPathBits: number[][];     // N_max × CONTRA_DEPTH membership path bits
 
-  // Patient attributes
-  patientAge: number;
-
-  // Unix timestamps in seconds
-  prescriptionTimestamp: number;
+  // Unix timestamps in seconds. Both are PUBLIC (read by the verifier) and bound into
+  // stmtHash; the freshness check now <= issuanceTime + validFor is done off-circuit.
+  issuanceTime: number;
   validFor: number;               // Prescription validity window in seconds
-  currentTimestamp: number;
 
   // N_max patient record reference slots (allergies, lab results)
   // refLeaf[i]      = Poseidon(recordId, recordType, substanceId, ...) — leaf hash

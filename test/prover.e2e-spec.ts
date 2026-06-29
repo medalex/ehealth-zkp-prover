@@ -304,13 +304,6 @@ describe('ProverService — policy enforcement (real Groth16 proofs)', () => {
     expect(r.outcome).toBe(true);
   });
 
-  // ── P4 TimeValid ────────────────────────────────────────────────────────────
-  it('P4: prescription older than validity window → FAIL', async () => {
-    const issuedLongAgo = Math.floor(Date.now() / 1000) - 800_000; // > 7 days
-    const r = await service.prove(baseReq({ prescriptionIssuedAt: issuedLongAgo }));
-    expect(r.outcome).toBe(false);
-  });
-
   // ── P6 LabPolicyOk ────────────────────────────────────────────────────────────
   it('P6: eGFR below threshold (20 < 30) for Metformin → FAIL', async () => {
     const r = await service.prove(

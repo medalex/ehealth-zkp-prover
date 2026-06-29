@@ -170,12 +170,12 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH, N
     // Prescription data
     signal input prescribedDrugIds[N_PRESC];
     signal input prescribedDosages[N_PRESC];
-    signal input childMaxDosages[N_DRUGS];
 
-    signal input patientAge;
-    signal input prescriptionTimestamp;
+    // issuanceTime + validFor are PUBLIC (read by the verifier) and bound into stmtHash;
+    // the freshness check now <= issuanceTime + validFor is performed off-circuit by the
+    // pharmacy, where the dispensing-time clock is meaningful (proof generation != dispensing).
+    signal input issuanceTime;
     signal input validFor;
-    signal input currentTimestamp;
     signal input workflowId;
 
     // Lab-based clinical policies (eGFR etc.)
@@ -216,7 +216,7 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH, N
     signal input patientRecordRoot;
     signal input nonce;
     signal input policyDrugIds[N_DRUGS];
-    signal input adultMaxDosages[N_DRUGS];
+    signal input maxDosages[N_DRUGS];
     // contraindicationRoot — governance contraindication-closure root (MFSSIA → DKG)
     signal input contraindicationRoot;
     // labRecordRoot — per-patient lab-record root (MFSSIA → DKG)
@@ -319,42 +319,23 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH, N
     }
     policy2 <== allNoConflict.out;
 
-    // ── Policy 3: DosageOk — dosage within permitted limits ─────────────────────
+    // ── Policy 3: DosageOk — dosage within the governance-approved maximum ───────
     signal policy3;
-    component childSel[N_PRESC];
-    component adultSel[N_PRESC];
-    component leChild[N_PRESC];
-    component leAdult[N_PRESC];
+    component maxSel[N_PRESC];
+    component leMax[N_PRESC];
     signal dosageOkPerRx[N_PRESC];
 
-    component ageIsChild = LessThan(BITLEN);
-    ageIsChild.a <== patientAge;
-    ageIsChild.b <== 11;
-
     for (var p = 0; p < N_PRESC; p++) {
-        childSel[p] = SelectValue(N_DRUGS);
-        childSel[p].key <== prescribedDrugIds[p];
-
-        adultSel[p] = SelectValue(N_DRUGS);
-        adultSel[p].key <== prescribedDrugIds[p];
-
+        maxSel[p] = SelectValue(N_DRUGS);
+        maxSel[p].key <== prescribedDrugIds[p];
         for (var i1 = 0; i1 < N_DRUGS; i1++) {
-            childSel[p].keys[i1]   <== policyDrugIds[i1];
-            childSel[p].values[i1] <== childMaxDosages[i1];
-            adultSel[p].keys[i1]   <== policyDrugIds[i1];
-            adultSel[p].values[i1] <== adultMaxDosages[i1];
+            maxSel[p].keys[i1]   <== policyDrugIds[i1];
+            maxSel[p].values[i1] <== maxDosages[i1];
         }
-
-        leChild[p] = LessEqThan(BITLEN);
-        leAdult[p] = LessEqThan(BITLEN);
-
-        leChild[p].a <== prescribedDosages[p];
-        leChild[p].b <== childSel[p].selected;
-
-        leAdult[p].a <== prescribedDosages[p];
-        leAdult[p].b <== adultSel[p].selected;
-
-        dosageOkPerRx[p] <== leAdult[p].out + ageIsChild.out * (leChild[p].out - leAdult[p].out);
+        leMax[p] = LessEqThan(BITLEN);
+        leMax[p].a <== prescribedDosages[p];
+        leMax[p].b <== maxSel[p].selected;
+        dosageOkPerRx[p] <== leMax[p].out;
     }
 
     component allP3 = AndN(N_PRESC);
@@ -362,13 +343,6 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH, N
         allP3.in[p2] <== dosageOkPerRx[p2];
     }
     policy3 <== allP3.out;
-
-    // ── Policy 4: TimeValid — prescription is still valid ───────────────────────
-    signal policy4;
-    component timeLe = LessEqThan(BITLEN);
-    timeLe.a <== currentTimestamp;
-    timeLe.b <== prescriptionTimestamp + validFor;
-    policy4 <== timeLe.out;
 
     // ── Policy 5: NonceBind — nonce is bound to workflowId ──────────────────────
     signal policy5;
@@ -472,45 +446,53 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH, N
     }
     policy6 <== allLabOk.out;
 
-    // ── Final AND(P1..P6) ────────────────────────────────────────────────────────
-    component finalAnd = AndN(6);
-    finalAnd.in[0] <== policy1;
-    finalAnd.in[1] <== policy2;
-    finalAnd.in[2] <== policy3;
-    finalAnd.in[3] <== policy4;
-    finalAnd.in[4] <== policy5;
-    finalAnd.in[5] <== policy6;
+    // ── Final AND: 4 predicates ──────────────────────────────────────────────────
+    //   P1 CredValid · P2 NoContraindication · P3 PolicySatisfied (dosage ∧ lab) · P4 NonceBind
+    signal policySatisfied;
+    policySatisfied <== policy3 * policy6;   // dosage ∧ lab, single satisfaction predicate
+
+    component finalAnd = AndN(4);
+    finalAnd.in[0] <== policy1;          // P1 CredValid
+    finalAnd.in[1] <== policy2;          // P2 NoContraindication
+    finalAnd.in[2] <== policySatisfied;  // P3 PolicySatisfied (dosage ∧ lab)
+    finalAnd.in[3] <== policy5;          // P4 NonceBind
     outcome <== finalAnd.out;
 
-    // ── stmtHash = Poseidon(dCH, nonce, drugIds..., dosages...) ─────────────────
-    component stmtHasher = Poseidon(2 * N_PRESC + 2);
+    // ── stmtHash = Poseidon(dCH, nonce, drugIds..., dosages..., issuanceTime, validFor) ──
+    component stmtHasher = Poseidon(2 * N_PRESC + 4);
     stmtHasher.inputs[0] <== doctorCredentialHash;
     stmtHasher.inputs[1] <== nonce;
     for (var k = 0; k < N_PRESC; k++) {
         stmtHasher.inputs[2 + k]           <== prescribedDrugIds[k];
         stmtHasher.inputs[2 + N_PRESC + k] <== prescribedDosages[k];
     }
+    stmtHasher.inputs[2 + 2 * N_PRESC]     <== issuanceTime;
+    stmtHasher.inputs[2 + 2 * N_PRESC + 1] <== validFor;
     stmtHash <== stmtHasher.out;
 }
 
 // Public inputs: the verifier binds a proof to:
 //   - physician registry root (validCredentialRoot from DKG via MFSSIA)
 //   - patient record root    (patientRecordRoot — allergies, built locally)
-//   - policy parameters T   (policyDrugIds, adultMaxDosages, lab policy params)
-//   - specific prescription  (stmtHash, nonce)
+//   - policy parameters T   (policyDrugIds, maxDosages, lab policy params)
+//   - specific prescription  (stmtHash, nonce, issuanceTime, validFor)
 // stmtHash and outcome are circuit outputs and are always public.
+// doctorCredentialHash is now PRIVATE (proven by membership in validCredentialRoot);
 // substanceId, contraValue and labValue are PRIVATE — the verifier sees only the
 // outcome and the committed roots, not patient allergy/lab data.
+// issuanceTime and validFor are public and bound into stmtHash; the freshness check
+// now <= issuanceTime + validFor is done off-circuit by the pharmacy.
 // contraindicationRoot binds P2 to the governance contraindication closure in DKG;
 // labRecordRoot binds P6 lab values to the patient's DKG lab record.
-// nPublic = 2 outputs + 18 public inputs = 20.
+// nPublic = 2 outputs + 19 public inputs = 21.
 component main {public [
-    doctorCredentialHash,
     validCredentialRoot,
     patientRecordRoot,
     nonce,
+    issuanceTime,
+    validFor,
     policyDrugIds,
-    adultMaxDosages,
+    maxDosages,
     labThreshold,
     labRequiredOp,
     labAppliesToDrug,

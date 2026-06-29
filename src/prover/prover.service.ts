@@ -46,25 +46,26 @@ const SUBSTANCE_IDX: Record<string, number> = {
 // MFSSIA contraindication closure committed in DKG, not in the prover.
 
 // Public signal indices (outputs first, then public inputs in declaration order):
-// outcome(0), stmtHash(1),
-// doctorCredentialHash(2), validCredentialRoot(3), patientRecordRoot(4), nonce(5),
-// policyDrugIds[3] → 6-8, adultMaxDosages[3] → 9-11, contraindicationRoot → 12,
-// labRecordRoot → 13, labThreshold[2] → 14-15, labRequiredOp[2] → 16-17, labAppliesToDrug[2] → 18-19
-// substanceId, contraValue and labValue are PRIVATE — not visible in publicSignals
+// outcome(0), stmtHash(1), issuanceTime(2), validFor(3),
+// validCredentialRoot(4), patientRecordRoot(5), nonce(6),
+// policyDrugIds[3] → 7-9, maxDosages[3] → 10-12, contraindicationRoot → 13,
+// labRecordRoot → 14, labThreshold[2] → 15-16, labRequiredOp[2] → 17-18, labAppliesToDrug[2] → 19-20
+// doctorCredentialHash, substanceId, contraValue and labValue are PRIVATE — not in publicSignals
 export const PUB = {
   outcome: 0,
   stmtHash: 1,
-  doctorCredentialHash: 2,
-  validCredentialRoot: 3,
-  patientRecordRoot: 4,
-  nonce: 5,
-  policyDrugIds: [6, 7, 8],
-  adultMaxDosages: [9, 10, 11],
-  contraindicationRoot: 12,
-  labRecordRoot: 13,
-  labThreshold: [14, 15],
-  labRequiredOp: [16, 17],
-  labAppliesToDrug: [18, 19],
+  issuanceTime: 2,
+  validFor: 3,
+  validCredentialRoot: 4,
+  patientRecordRoot: 5,
+  nonce: 6,
+  policyDrugIds: [7, 8, 9],
+  maxDosages: [10, 11, 12],
+  contraindicationRoot: 13,
+  labRecordRoot: 14,
+  labThreshold: [15, 16],
+  labRequiredOp: [17, 18],
+  labAppliesToDrug: [19, 20],
 } as const;
 
 // High-level request from hospital-api (ASP.NET Core serializes to camelCase)
@@ -78,7 +79,6 @@ interface HighLevelRequest {
   patientId: string;
   drugIds: number[];
   dosages: string[];
-  patientAge: number;
   workflowId: number;
   prescriptionIssuedAt?: number;
   allergies: string[];
@@ -203,9 +203,9 @@ export class ProverService implements OnModuleInit {
     // Dosages: extract numeric part ("500mg" → "500")
     const prescribedDosages = (req.dosages ?? []).slice(0, N_PRESC).map(d => this.parseDosage(d));
 
-    // Maximum dosages from DKG policies (lab-metric policies are routed to P6 below)
-    const adultMax = new Array(N_DRUGS).fill('65535');
-    const childMax = new Array(N_DRUGS).fill('65535');
+    // Maximum dosages from DKG policies (lab-metric policies are routed to P6 below).
+    // Single governance-approved maximum per drug (age stratification removed).
+    const maxDosages = new Array(N_DRUGS).fill('65535');
     for (const p of req.policies ?? []) {
       const cond = (p.clinicalCondition ?? '').toLowerCase().trim();
       if (LAB_METRICS.has(cond)) continue;   // lab policy → handled by P6, not dosage
@@ -215,12 +215,7 @@ export class ProverService implements OnModuleInit {
                  : code.includes('amoxicillin') ? 2
                  : -1;
       if (dIdx < 0) continue;
-      const thresh = Math.floor(Number(p.threshold)).toString();
-      if (cond.includes('child') || cond.includes('pediatric')) {
-        childMax[dIdx] = thresh;
-      } else {
-        adultMax[dIdx] = thresh;
-      }
+      maxDosages[dIdx] = Math.floor(Number(p.threshold)).toString();
     }
 
     // Lab-based clinical policies (P6) — eGFR etc.
@@ -268,8 +263,9 @@ export class ProverService implements OnModuleInit {
     const nowSec = Math.floor(Date.now() / 1000);
     const issuedAt = req.prescriptionIssuedAt ?? nowSec;
 
-    // Prescription validity window (P4 TimeValid) from DKG governance (deltaMax) for the
-    // prescribed drug, falling back to 7 days when no policy specifies one.
+    // Prescription validity window from DKG governance (deltaMax) for the prescribed
+    // drug, falling back to 7 days. Exposed as a public input + bound into stmtHash;
+    // the freshness check (now <= issuanceTime + validFor) is done by the pharmacy.
     const prescribedId = (req.drugIds ?? [])[0];
     const drugName = Object.keys(DRUG_ID).find(k => DRUG_ID[k] === prescribedId);
     let validFor = '604800'; // 7 days default
@@ -292,17 +288,14 @@ export class ProverService implements OnModuleInit {
       contraValue,
       contraSiblings,
       contraPathBits: contraPathBits.map(row => row.map(String)),
-      adultMaxDosages: adultMax,
+      maxDosages,
       credentialSiblings: credSiblings,
       credentialPathBits: credPathBits,
       prescribedDrugIds: (req.drugIds ?? []).slice(0, N_PRESC).map(String),
       prescribedDosages,
-      patientAge: String(req.patientAge ?? 0),
-      prescriptionTimestamp: String(issuedAt),
+      issuanceTime: String(issuedAt),
       validFor,   // from DKG governance deltaMax (default 7 days)
-      currentTimestamp: String(nowSec),
       workflowId: String(req.workflowId ?? 0),
-      childMaxDosages: childMax,
       refLeaf,
       refSiblings,
       refPathBits: refPathBitsArr.map(row => row.map(String)),
@@ -332,17 +325,14 @@ export class ProverService implements OnModuleInit {
       contraValue: dto.contraValue.map(String),
       contraSiblings: dto.contraSiblings.map(row => row.map(String)),
       contraPathBits: dto.contraPathBits.map(row => row.map(String)),
-      adultMaxDosages: dto.adultMaxDosages,
+      maxDosages: dto.maxDosages,
       credentialSiblings: dto.credentialSiblings,
       credentialPathBits: dto.credentialPathBits.map(String),
       prescribedDrugIds: dto.prescribedDrugIds,
       prescribedDosages: dto.prescribedDosages,
-      patientAge: String(dto.patientAge),
-      prescriptionTimestamp: String(dto.prescriptionTimestamp),
+      issuanceTime: String(dto.issuanceTime),
       validFor: String(dto.validFor),
-      currentTimestamp: String(dto.currentTimestamp),
       workflowId: String(dto.workflowId),
-      childMaxDosages: dto.childMaxDosages,
       refLeaf: dto.refLeaf,
       refSiblings: dto.refSiblings.map(row => row.map(String)),
       refPathBits: dto.refPathBits.map(row => row.map(String)),
