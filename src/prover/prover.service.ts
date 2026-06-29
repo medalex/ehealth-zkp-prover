@@ -366,12 +366,13 @@ export class ProverService implements OnModuleInit {
 
     let nonce: string;
     let input: Record<string, unknown>;
+    let highReq: HighLevelRequest | null = null;
 
     if ('doctorCredentialUal' in dto) {
       // High-level format from hospital-api (ASP.NET Core camelCase JSON)
-      const req = dto as HighLevelRequest;
-      nonce = this.poseidonHash([BigInt(req.workflowId ?? 0)]).toString();
-      input = this.buildHighLevelInput(req, nonce);
+      highReq = dto as HighLevelRequest;
+      nonce = this.poseidonHash([BigInt(highReq.workflowId ?? 0)]).toString();
+      input = this.buildHighLevelInput(highReq, nonce);
     } else {
       // Low-level format (direct circuit inputs)
       const req = dto as ProveRequestDto;
@@ -386,13 +387,74 @@ export class ProverService implements OnModuleInit {
       this.zkeyPath,
     );
 
+    const outcome = parseInt(publicSignals[PUB.outcome]) === 1;
+
     return {
       proof,
       publicSignals,
-      outcome: parseInt(publicSignals[PUB.outcome]) === 1,  // bool for C# System.Text.Json
+      outcome, // bool for C# System.Text.Json
       stmtHash: publicSignals[PUB.stmtHash],
       nonce,
+      // Diagnostic, prescribing-side only: WHY the prescription was rejected. Derived from
+      // the witness the doctor already holds — NOT part of the proof / public signals, so the
+      // pharmacy still sees only the binary outcome.
+      reasons: !outcome && highReq ? this.computeReasons(highReq) : [],
     };
+  }
+
+  // Re-derives the human-readable rejection reasons from the high-level request (witness).
+  // Mirrors P2/P3/P6 at the semantic level for clinician feedback; never leaves the
+  // prescribing side and is not encoded in the proof.
+  private computeReasons(req: HighLevelRequest): string[] {
+    const reasons: string[] = [];
+    const drugId = (req.drugIds ?? [])[0];
+    const drugName = Object.keys(DRUG_ID).find((k) => DRUG_ID[k] === drugId) ?? `drug ${drugId}`;
+    const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
+    // P2 — committed contraindication: an active allergy contraindicates the prescribed drug.
+    const substances = req.substances ?? req.allergies ?? [];
+    (req.contraProofs ?? []).forEach((cp, i) => {
+      if (cp?.value === 1) {
+        reasons.push(`Contraindication: ${substances[i] ?? `substance ${i}`} allergy contraindicates ${cap(drugName)}`);
+      }
+    });
+
+    // P3 — dosage above the governance maximum for the prescribed drug.
+    const dose = Number(this.parseDosage((req.dosages ?? [])[0] ?? '0'));
+    let max = Number.POSITIVE_INFINITY;
+    for (const p of req.policies ?? []) {
+      const cond = (p.clinicalCondition ?? '').toLowerCase().trim();
+      if (LAB_METRICS.has(cond)) continue;
+      if (!(p.medicationCode ?? '').toLowerCase().includes(drugName)) continue;
+      max = Math.floor(Number(p.threshold));
+    }
+    if (Number.isFinite(max) && dose > max) {
+      reasons.push(`Dosage ${dose} exceeds the maximum ${max} for ${cap(drugName)}`);
+    }
+
+    // P6 — lab policy violated for the prescribed drug (most recent measurement).
+    for (const p of req.policies ?? []) {
+      const metric = (p.clinicalCondition ?? '').toLowerCase().trim();
+      if (!LAB_METRICS.has(metric)) continue;
+      if (DRUG_ID[(p.medicationCode ?? '').toLowerCase()] !== drugId) continue;
+      const matches = (req.labResults ?? []).filter((r) => (r.metric ?? '').toLowerCase().trim() === metric);
+      if (!matches.length) continue;
+      const lr = matches.sort((a, b) =>
+        new Date(b.measuredAt ?? 0).getTime() - new Date(a.measuredAt ?? 0).getTime())[0];
+      const val = Math.floor(Number(lr.value ?? 0));
+      const thr = Math.floor(Number(p.threshold));
+      const op = OP_CODE[(p.comparisonOperator ?? '').toLowerCase().trim()] ?? 0;
+      const safe = op === 0 ? val >= thr : op === 1 ? val <= thr : op === 2 ? val === thr : val !== thr;
+      if (!safe) {
+        const sym = ['>=', '<=', '==', '!='][op];
+        reasons.push(`Lab: ${p.clinicalCondition} ${val} fails policy (requires ${sym} ${thr}) for ${cap(drugName)}`);
+      }
+    }
+
+    if (!reasons.length) {
+      reasons.push('One or more policy checks failed (e.g. credential not in registry)');
+    }
+    return reasons;
   }
 
 }
