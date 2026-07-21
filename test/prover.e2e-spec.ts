@@ -5,7 +5,7 @@ import { ProverService } from '../src/prover/prover.service';
 
 // End-to-end policy enforcement tests. Each test generates a REAL Groth16 proof
 // against the compiled circuit and asserts the resulting outcome, so the circuit
-// (P1–P6) and the prover's witness routing are both exercised.
+// (P1–P4) and the prover's witness routing are both exercised.
 
 const MERKLE_DEPTH = 3;
 const PATIENT = '00000000-0000-0000-0000-000000000001';
@@ -304,8 +304,8 @@ describe('ProverService — policy enforcement (real Groth16 proofs)', () => {
     expect(r.outcome).toBe(true);
   });
 
-  // ── P6 LabPolicyOk ────────────────────────────────────────────────────────────
-  it('P6: eGFR below threshold (20 < 30) for Metformin → FAIL', async () => {
+  // ── P3 lab clause (LabPolicyOk) ─────────────────────────────────────────────────
+  it('P3 (lab): eGFR below threshold (20 < 30) for Metformin → FAIL', async () => {
     const r = await service.prove(
       baseReq({
         drugIds: [METFORMIN],
@@ -316,7 +316,7 @@ describe('ProverService — policy enforcement (real Groth16 proofs)', () => {
     expect(r.outcome).toBe(false);
   });
 
-  it('P6: eGFR at/above threshold (45 >= 30) → PASS', async () => {
+  it('P3 (lab): eGFR at/above threshold (45 >= 30) → PASS', async () => {
     const r = await service.prove(
       baseReq({
         drugIds: [METFORMIN],
@@ -327,7 +327,7 @@ describe('ProverService — policy enforcement (real Groth16 proofs)', () => {
     expect(r.outcome).toBe(true);
   });
 
-  it('P6: picks the most recent result — newer 20 masks older 45 → FAIL', async () => {
+  it('P3 (lab): picks the most recent result — newer 20 masks older 45 → FAIL', async () => {
     const r = await service.prove(
       baseReq({
         drugIds: [METFORMIN],
@@ -341,7 +341,7 @@ describe('ProverService — policy enforcement (real Groth16 proofs)', () => {
     expect(r.outcome).toBe(false);
   });
 
-  it('P6: lab policy targets Metformin only — prescribing Penicillin is unaffected → PASS', async () => {
+  it('P3 (lab): lab policy targets Metformin only — prescribing Penicillin is unaffected → PASS', async () => {
     const r = await service.prove(
       baseReq({
         drugIds: [PENICILLIN],

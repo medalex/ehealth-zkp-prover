@@ -41,7 +41,7 @@ export class ProveRequestDto {
   refPathBits: number[][];
   refIsActive: number[];
 
-  // N_LAB lab-based clinical policy slots (P6 — eGFR etc.)
+  // N_LAB lab-based clinical policy slots (P3 lab clause — eGFR etc.)
   // labValue[L]         = patient measurement (PRIVATE, trusted prover)
   // labIsActive[L]      = 1 for an active slot, 0 for padding
   // labThreshold[L]     = clinical threshold from DKG (PUBLIC)

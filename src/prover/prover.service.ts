@@ -18,8 +18,8 @@ const DRUG_ID: Record<string, number> = {
   metformin: 105, penicillin: 103, amoxicillin: 107,
 };
 
-// Clinical lab metrics — policies on these become lab-policy slots (P6),
-// everything else is folded into dosage limits (P3).
+// Clinical lab metrics — policies on these become lab-policy slots (P3 lab clause),
+// everything else is folded into dosage limits (P3 dosage clause).
 const LAB_METRICS = new Set(['egfr', 'creatinine', 'alt', 'ast', 'inr']);
 
 // DKG comparison operator → circuit op code for the required (safe) condition:
@@ -203,12 +203,12 @@ export class ProverService implements OnModuleInit {
     // Dosages: extract numeric part ("500mg" → "500")
     const prescribedDosages = (req.dosages ?? []).slice(0, N_PRESC).map(d => this.parseDosage(d));
 
-    // Maximum dosages from DKG policies (lab-metric policies are routed to P6 below).
+    // Maximum dosages from DKG policies (lab-metric policies are routed to the P3 lab clause below).
     // Single governance-approved maximum per drug (age stratification removed).
     const maxDosages = new Array(N_DRUGS).fill('65535');
     for (const p of req.policies ?? []) {
       const cond = (p.clinicalCondition ?? '').toLowerCase().trim();
-      if (LAB_METRICS.has(cond)) continue;   // lab policy → handled by P6, not dosage
+      if (LAB_METRICS.has(cond)) continue;   // lab policy → handled by the P3 lab clause, not dosage
       const code = (p.medicationCode ?? '').toLowerCase();
       const dIdx = code.includes('metformin') ? 0
                  : code.includes('penicillin') ? 1
@@ -218,7 +218,7 @@ export class ProverService implements OnModuleInit {
       maxDosages[dIdx] = Math.floor(Number(p.threshold)).toString();
     }
 
-    // Lab-based clinical policies (P6) — eGFR etc.
+    // Lab-based clinical policies (P3 lab clause) — eGFR etc.
     // A slot is activated only when the patient has a matching lab measurement;
     // missing measurement → slot inactive → no block (cannot evaluate).
     if (!req.labRecordRoot) {
@@ -403,7 +403,7 @@ export class ProverService implements OnModuleInit {
   }
 
   // Re-derives the human-readable rejection reasons from the high-level request (witness).
-  // Mirrors P2/P3/P6 at the semantic level for clinician feedback; never leaves the
+  // Mirrors P2/P3 (contraindication, dosage and lab clauses) at the semantic level for clinician feedback; never leaves the
   // prescribing side and is not encoded in the proof.
   private computeReasons(req: HighLevelRequest): string[] {
     const reasons: string[] = [];
@@ -432,7 +432,7 @@ export class ProverService implements OnModuleInit {
       reasons.push(`Dosage ${dose} exceeds the maximum ${max} for ${cap(drugName)}`);
     }
 
-    // P6 — lab policy violated for the prescribed drug (most recent measurement).
+    // P3 lab clause — lab policy violated for the prescribed drug (most recent measurement).
     for (const p of req.policies ?? []) {
       const metric = (p.clinicalCondition ?? '').toLowerCase().trim();
       if (!LAB_METRICS.has(metric)) continue;

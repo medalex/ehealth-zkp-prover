@@ -483,7 +483,7 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH, N
 // issuanceTime and validFor are public and bound into stmtHash; the freshness check
 // now <= issuanceTime + validFor is done off-circuit by the pharmacy.
 // contraindicationRoot binds P2 to the governance contraindication closure in DKG;
-// labRecordRoot binds P6 lab values to the patient's DKG lab record.
+// labRecordRoot binds the P3 lab-clause values to the patient's DKG lab record.
 // nPublic = 2 outputs + 19 public inputs = 21.
 component main {public [
     validCredentialRoot,
