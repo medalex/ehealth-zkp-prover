@@ -7,7 +7,7 @@ import { ProveRequestDto } from './dto/prove-request.dto';
 
 // Circuit sizes — must match the compiled circom artifact.
 const N_DRUGS = 3;
-const N_max = 3;   // reference slot count; n_total ≈ n_cred + N_max·n_Merkle + |Pol|·n_range
+const N_max = 5;   // reference slot count; n_total ≈ n_cred + N_max·n_Merkle + |Pol|·n_range
 const N_PRESC = 1;
 const MERKLE_DEPTH = 3;
 const CONTRA_DEPTH = 4;   // contraindication-closure tree depth (matches the circuit)

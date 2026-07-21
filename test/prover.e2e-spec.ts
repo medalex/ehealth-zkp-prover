@@ -79,7 +79,7 @@ function buildPatientRecord(poseidon: any, patientId: string, allergies: string[
     return ph(patientField, code);
   };
 
-  const N_MAX = 3;
+  const N_MAX = 5;
   const size = 1 << MERKLE_DEPTH;
   const active = allergies.slice(0, N_MAX);
   const leafValues: bigint[] = Array.from({ length: N_MAX }, (_, i) =>

@@ -498,4 +498,4 @@ component main {public [
     labAppliesToDrug,
     contraindicationRoot,
     labRecordRoot
-]} = PrescriptionValidation(3, 3, 1, 32, 3, 2, 4, 3);
+]} = PrescriptionValidation(3, 5, 1, 32, 3, 2, 4, 3);
