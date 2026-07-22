@@ -241,7 +241,6 @@ describe('ProverService — policy enforcement (real Groth16 proofs)', () => {
       patientId: PATIENT,
       drugIds: [METFORMIN],
       dosages: ['8'],
-      patientAge: 40,
       workflowId: 77,
       allergies: [] as string[],
       labResults: [] as unknown[],
