@@ -1,7 +1,9 @@
 import 'reflect-metadata';
 import { createHash } from 'crypto';
+import { readFileSync } from 'fs';
+import path from 'path';
 import { buildPoseidon } from 'circomlibjs';
-import { ProverService } from '../src/prover/prover.service';
+import { ProverService, PUB } from '../src/prover/prover.service';
 
 // End-to-end policy enforcement tests. Each test generates a REAL Groth16 proof
 // against the compiled circuit and asserts the resulting outcome, so the circuit
@@ -349,5 +351,46 @@ describe('ProverService — policy enforcement (real Groth16 proofs)', () => {
       }),
     );
     expect(r.outcome).toBe(true);
+  });
+
+  // ── Cryptographic soundness & binding: real Groth16 verify ───────────────────
+  // These validate the proof itself (not just the computed outcome): an honest proof
+  // verifies against the governance key, while tampering the public signals (S6),
+  // forging the outcome bit (S5b/S11), or using a different key (S7) all fail.
+  const vKey = JSON.parse(
+    readFileSync(path.join(__dirname, '..', 'circuits', 'verification_key.json'), 'utf8'),
+  );
+
+  it('accept proof verifies against the governance verification key', async () => {
+    const snarkjs = await import('snarkjs');
+    const r = await service.prove(baseReq());
+    expect(await snarkjs.groth16.verify(vKey, r.publicSignals, r.proof)).toBe(true);
+  });
+
+  it('S6: tampering a committed public signal invalidates the proof', async () => {
+    const snarkjs = await import('snarkjs');
+    const r = await service.prove(baseReq());
+    const tampered = [...r.publicSignals];
+    tampered[PUB.patientRecordRoot] = '123456789'; // forge a different patient-record root
+    expect(await snarkjs.groth16.verify(vKey, tampered, r.proof)).toBe(false);
+  });
+
+  it('S5b: forging the outcome (reject → accept) does not verify', async () => {
+    const snarkjs = await import('snarkjs');
+    const r = await service.prove(baseReq({ allergies: ['Penicillin'], drugIds: [PENICILLIN] }));
+    expect(r.outcome).toBe(false);
+    const forged = [...r.publicSignals];
+    forged[PUB.outcome] = '1'; // claim acceptance for a contraindicated prescription
+    expect(await snarkjs.groth16.verify(vKey, forged, r.proof)).toBe(false);
+  });
+
+  it('S7: a valid proof does not verify under a different verification key', async () => {
+    const snarkjs = await import('snarkjs');
+    const r = await service.prove(baseReq());
+    const wrongKey = JSON.parse(JSON.stringify(vKey));
+    wrongKey.IC[0][0] = (BigInt(wrongKey.IC[0][0]) + 1n).toString(); // corrupt one key element
+    let ok = false;
+    try { ok = await snarkjs.groth16.verify(wrongKey, r.publicSignals, r.proof); } catch { ok = false; }
+    expect(ok).toBe(false);
   });
 });
