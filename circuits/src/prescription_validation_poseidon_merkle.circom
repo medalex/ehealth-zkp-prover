@@ -185,6 +185,9 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH, N
     signal input labIsActive[N_LAB];
     // Lab-record membership: each active measurement is bound to the patient's DKG lab
     // record — leaf = Poseidon(patientField, labMetricId[L], labValue[L]) ∈ labRecordRoot.
+    // labMetricId is private but no longer free: it is pinned to the PUBLIC labMetricIdPub[L]
+    // (see below), so the metric a slot proves membership for is the metric the public
+    // policy parameters were written for.
     signal input labMetricId[N_LAB];
     signal input labRecordSiblings[N_LAB][LAB_DEPTH];
     signal input labRecordPathBits[N_LAB][LAB_DEPTH];
@@ -226,9 +229,14 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH, N
     // labThreshold[L]     — clinical threshold value (e.g. 30 for eGFR)
     // labRequiredOp[L]    — required (safe) condition: 0=GTE, 1=LTE, 2=EQ, 3=NEQ
     // labAppliesToDrug[L] — drugId the policy targets (0 for padding slots)
+    // labMetricIdPub[L]   — metric the policy governs, stringToField(clinicalCondition)
+    //                       (0 for padding slots). Binds the private labMetricId[L] used in
+    //                       the lab-record leaf to the metric of this public policy, so a
+    //                       prover cannot satisfy "eGFR >= 30" with a haemoglobin record.
     signal input labThreshold[N_LAB];
     signal input labRequiredOp[N_LAB];
     signal input labAppliesToDrug[N_LAB];
+    signal input labMetricIdPub[N_LAB];
 
     // ── Outputs ─────────────────────────────────────────────────────────────────
     signal output outcome;
@@ -390,6 +398,20 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH, N
         labActiveBool[L] = ForceBool();
         labActiveBool[L].in <== labIsActive[L];
 
+        // does this policy target the prescribed drug? (N_PRESC=1)
+        labApplies[L] = IsEqual();
+        labApplies[L].a <== labAppliesToDrug[L];
+        labApplies[L].b <== prescribedDrugIds[0];
+
+        // Slot activation is NOT prover-controlled: a slot is active exactly when its
+        // public policy targets the prescribed drug. Without this the prover could set
+        // labIsActive = 0 and make labRecActiveValid (and the whole slot) vanish.
+        labIsActive[L] === labApplies[L].out;
+
+        // The metric proved by the membership leaf is pinned to the public policy metric,
+        // so the slot cannot be satisfied with an unrelated (but genuine) lab record.
+        labMetricId[L] === labMetricIdPub[L];
+
         // Lab-record membership: an active measurement must belong to the patient's
         // DKG lab record — leaf = Poseidon(patientField, labMetricId, labValue).
         labLeaf[L] = Poseidon(3);
@@ -432,11 +454,6 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH, N
         veq2[L] <== isOp2[L].out * (1 - labEq[L].out);
         veq3[L] <== isOp3[L].out * labEq[L].out;
         labViol[L] <== vlt[L] + vgt[L] + veq2[L] + veq3[L];
-
-        // does this policy target the prescribed drug? (N_PRESC=1)
-        labApplies[L] = IsEqual();
-        labApplies[L].a <== labAppliesToDrug[L];
-        labApplies[L].b <== prescribedDrugIds[0];
 
         // block = active AND violated AND applies
         labT1[L]      <== labIsActive[L] * labViol[L];
@@ -484,7 +501,10 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH, N
 // now <= issuanceTime + validFor is done off-circuit by the pharmacy.
 // contraindicationRoot binds P2 to the governance contraindication closure in DKG;
 // labRecordRoot binds the P3 lab-clause values to the patient's DKG lab record.
-// nPublic = 2 outputs + 19 public inputs = 21.
+// labMetricIdPub binds each lab slot to the metric its public policy governs; together with
+// labIsActive === labApplies[L].out it removes the two prover-controlled escapes from P3's
+// lab clause (silently deactivating a slot, or answering it with a different metric).
+// nPublic = 2 outputs + 21 public inputs = 23.
 component main {public [
     validCredentialRoot,
     patientRecordRoot,
@@ -496,6 +516,7 @@ component main {public [
     labThreshold,
     labRequiredOp,
     labAppliesToDrug,
+    labMetricIdPub,
     contraindicationRoot,
     labRecordRoot
 ]} = PrescriptionValidation(3, 5, 1, 32, 3, 2, 4, 3);

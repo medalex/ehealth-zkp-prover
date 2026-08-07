@@ -49,7 +49,8 @@ const SUBSTANCE_IDX: Record<string, number> = {
 // outcome(0), stmtHash(1), issuanceTime(2), validFor(3),
 // validCredentialRoot(4), patientRecordRoot(5), nonce(6),
 // policyDrugIds[3] → 7-9, maxDosages[3] → 10-12, contraindicationRoot → 13,
-// labRecordRoot → 14, labThreshold[2] → 15-16, labRequiredOp[2] → 17-18, labAppliesToDrug[2] → 19-20
+// labRecordRoot → 14, labThreshold[2] → 15-16, labRequiredOp[2] → 17-18, labAppliesToDrug[2] → 19-20,
+// labMetricIdPub[2] → 21-22
 // doctorCredentialHash, substanceId, contraValue and labValue are PRIVATE — not in publicSignals
 export const PUB = {
   outcome: 0,
@@ -66,6 +67,7 @@ export const PUB = {
   labThreshold: [15, 16],
   labRequiredOp: [17, 18],
   labAppliesToDrug: [19, 20],
+  labMetricIdPub: [21, 22],
 } as const;
 
 // High-level request from hospital-api (ASP.NET Core serializes to camelCase)
@@ -219,8 +221,10 @@ export class ProverService implements OnModuleInit {
     }
 
     // Lab-based clinical policies (P3 lab clause) — eGFR etc.
-    // A slot is activated only when the patient has a matching lab measurement;
-    // missing measurement → slot inactive → no block (cannot evaluate).
+    // Slot activation is fixed by the circuit: labIsActive[L] === (labAppliesToDrug[L] ==
+    // prescribedDrugIds[0]). A slot whose policy targets another drug MUST be inactive, and a
+    // slot whose policy targets the prescribed drug MUST be active and carry a lab-record
+    // membership proof — the prover can no longer opt out of a policy that applies.
     if (!req.labRecordRoot) {
       throw new Error('labRecordRoot is required — fetch it from the MFSSIA lab-record registry');
     }
@@ -232,9 +236,13 @@ export class ProverService implements OnModuleInit {
     const labValue = new Array(N_LAB).fill('0');
     const labIsActive = new Array(N_LAB).fill('0');
     const labMetricId = new Array(N_LAB).fill('0');
+    // PUBLIC: the metric each policy governs, derived from the POLICY (clinicalCondition),
+    // never from the measurement — otherwise labMetricId === labMetricIdPub is vacuous.
+    const labMetricIdPub = new Array(N_LAB).fill('0');
     const labRecordSiblings: string[][] = new Array(N_LAB).fill(null).map(() => new Array(MERKLE_DEPTH).fill('0'));
     const labRecordPathBits: number[][] = new Array(N_LAB).fill(null).map(() => new Array(MERKLE_DEPTH).fill(0));
 
+    const prescribedDrugId = (req.drugIds ?? [])[0];
     let labSlot = 0;
     for (const p of req.policies ?? []) {
       const metric = (p.clinicalCondition ?? '').toLowerCase().trim();
@@ -242,21 +250,41 @@ export class ProverService implements OnModuleInit {
       if (labSlot >= N_LAB) break;
       const drugId = DRUG_ID[(p.medicationCode ?? '').toLowerCase()] ?? 0;
       if (!drugId) continue;
-      // Use the most recent measurement for this metric (a patient may have several)
-      const matches = labResults.filter(r => (r.metric ?? '').toLowerCase().trim() === metric);
-      if (!matches.length) continue;   // no measurement on file → cannot evaluate this policy
-      const lr = matches.sort((a, b) =>
-        new Date(b.measuredAt ?? 0).getTime() - new Date(a.measuredAt ?? 0).getTime())[0];
       const op = OP_CODE[(p.comparisonOperator ?? '').toLowerCase().trim()] ?? 0;
+      // Public policy parameters — committed regardless of whether the slot is active.
       labThreshold[labSlot]     = String(Math.floor(Number(p.threshold)));
       labRequiredOp[labSlot]    = String(op);
       labAppliesToDrug[labSlot] = String(drugId);
-      labValue[labSlot]         = String(Math.floor(Number(lr.value ?? 0)));
-      labIsActive[labSlot]      = '1';
-      // Lab-record membership for this measurement (from MFSSIA lab-record proof).
-      labMetricId[labSlot]      = String(lr.metricId ?? '0');
-      if (lr.siblings) labRecordSiblings[labSlot] = lr.siblings;
-      if (lr.pathBits) labRecordPathBits[labSlot] = lr.pathBits;
+      labMetricIdPub[labSlot]   = this.stringToField(metric).toString();
+      // Private metric id is pinned to the public one (circuit: labMetricId === labMetricIdPub);
+      // it is also what the MFSSIA lab-record leaf uses, so membership still verifies.
+      labMetricId[labSlot]      = labMetricIdPub[labSlot];
+
+      // Use the most recent measurement for this metric (a patient may have several)
+      const matches = labResults.filter(r => (r.metric ?? '').toLowerCase().trim() === metric);
+      const lr = matches.sort((a, b) =>
+        new Date(b.measuredAt ?? 0).getTime() - new Date(a.measuredAt ?? 0).getTime())[0];
+
+      if (drugId === prescribedDrugId) {
+        // Policy applies → the circuit forces labIsActive = 1, which requires a lab-record
+        // membership proof. Without a measurement no witness exists; fail loudly instead of
+        // silently dropping the policy (which the old `continue` did).
+        if (!lr) {
+          throw new Error(
+            `Lab policy "${p.clinicalCondition}" applies to the prescribed drug (${drugId}) but the ` +
+            `patient has no ${metric} measurement in the MFSSIA lab record — cannot build a witness ` +
+            `(the circuit requires an active, Merkle-proved measurement for every applicable lab policy).`,
+          );
+        }
+        labValue[labSlot]    = String(Math.floor(Number(lr.value ?? 0)));
+        labIsActive[labSlot] = '1';
+        if (lr.siblings) labRecordSiblings[labSlot] = lr.siblings;
+        if (lr.pathBits) labRecordPathBits[labSlot] = lr.pathBits;
+      } else {
+        // Policy targets a different drug → labApplies = 0, so the slot must stay inactive.
+        // labValue/siblings are then unconstrained; keep them at the zero padding.
+        labIsActive[labSlot] = '0';
+      }
       labSlot++;
     }
 
@@ -305,6 +333,7 @@ export class ProverService implements OnModuleInit {
       labThreshold,
       labRequiredOp,
       labAppliesToDrug,
+      labMetricIdPub,
       labRecordRoot,
       labMetricId,
       labRecordSiblings,
@@ -342,6 +371,7 @@ export class ProverService implements OnModuleInit {
       labThreshold: dto.labThreshold,
       labRequiredOp: dto.labRequiredOp.map(String),
       labAppliesToDrug: dto.labAppliesToDrug,
+      labMetricIdPub: dto.labMetricIdPub,
       labRecordRoot: dto.labRecordRoot,
       labMetricId: dto.labMetricId,
       labRecordSiblings: dto.labRecordSiblings.map(row => row.map(String)),

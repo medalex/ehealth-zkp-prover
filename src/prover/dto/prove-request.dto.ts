@@ -47,11 +47,16 @@ export class ProveRequestDto {
   // labThreshold[L]     = clinical threshold from DKG (PUBLIC)
   // labRequiredOp[L]    = required (safe) condition: 0=GTE, 1=LTE, 2=EQ, 3=NEQ (PUBLIC)
   // labAppliesToDrug[L] = drugId the policy targets, 0 for padding (PUBLIC)
+  // labMetricIdPub[L]   = stringToField(clinicalCondition) — the metric the policy governs,
+  //                       0 for padding (PUBLIC). The circuit enforces
+  //                       labMetricId[L] === labMetricIdPub[L] and
+  //                       labIsActive[L] === (labAppliesToDrug[L] == prescribedDrugIds[0]).
   labValue: string[];
   labIsActive: number[];
   labThreshold: string[];
   labRequiredOp: number[];
   labAppliesToDrug: string[];
+  labMetricIdPub: string[];
 
   // Lab-record membership (MFSSIA → DKG): leaf = Poseidon(patientField, labMetricId[L], labValue[L])
   labRecordRoot: string;
