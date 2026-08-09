@@ -128,6 +128,9 @@ function buildPatientRecord(poseidon: any, patientId: string, allergies: string[
     }
   }
 
+  // The zero leaf sits at index `active.length`; its path is what commits the count.
+  const padding = merklePathAt(tree, active.length);
+
   return {
     substances: active,
     patientRecordRoot: tree[MERKLE_DEPTH][0].toString(),
@@ -135,8 +138,31 @@ function buildPatientRecord(poseidon: any, patientId: string, allergies: string[
     refSiblings,
     refPathBits,
     refIsActive,
+    allergyCount: active.length,
+    paddingSiblings: padding.siblings,
+    paddingPathBits: padding.pathBits,
+    tree,
   };
 }
+
+// Membership path (siblings + little-endian index bits) of a leaf index in a built tree.
+// The circuit pins paddingPathBits to Num2Bits(allergyCount), so these bits ARE the index.
+function merklePathAt(tree: bigint[][], index: number, depth = MERKLE_DEPTH) {
+  const siblings: string[] = [];
+  const pathBits: number[] = [];
+  let idx = index;
+  for (let d = 0; d < depth; d++) {
+    const sib = idx % 2 === 0 ? idx + 1 : idx - 1;
+    siblings.push(tree[d][sib].toString());
+    pathBits.push(idx % 2);
+    idx = Math.floor(idx / 2);
+  }
+  return { siblings, pathBits };
+}
+
+// merklePathAt output → the request field names the prover expects.
+const renamePath = (p: { siblings: string[]; pathBits: number[] }) =>
+  ({ paddingSiblings: p.siblings, paddingPathBits: p.pathBits });
 
 // Mirrors the MFSSIA contraindication registry: closure tree with
 // leaf = Poseidon(substanceId, realDrugId, value), depth 4.
@@ -298,6 +324,58 @@ describe('ProverService — policy enforcement (real Groth16 proofs)', () => {
   it('P2: allergy to an unrelated drug → PASS', async () => {
     const r = await service.prove(baseReq({ allergies: ['Penicillin'], drugIds: [METFORMIN] }));
     expect(r.outcome).toBe(true);
+  });
+
+  // ── P2: the allergy-count commitment ────────────────────────────────────────
+  // Policy 2 used to be opt-in: refIsActive was a free input, so [0,0,0,0,0] satisfied every
+  // slot constraint tautologically and gave policy2 = 1 whatever the committed tree held.
+  // Activation is now derived from allergyCount, and the zero leaf must be proved to sit at
+  // that index — with its path pinned to the index, or the proof could point at a genuine
+  // zero further along and skip everything before it.
+
+  it('P2 attack: claiming zero allergies while the record holds a blocking one → no witness', async () => {
+    const req = baseReq({ allergies: ['Penicillin'], drugIds: [PENICILLIN] });
+    const record = buildPatientRecord(poseidon, PATIENT, ['Penicillin']);
+
+    // The whole attack, in three fields: deactivate every slot by understating the count,
+    // and point the padding proof at index 0.
+    const attack = { ...req, allergyCount: 0, ...renamePath(merklePathAt(record.tree, 0)) };
+
+    // Index 0 holds the Penicillin leaf, not zero, so the padding membership proof fails.
+    await expect(service.prove(attack)).rejects.toThrow();
+  });
+
+  it('P2 attack: understating the count (3 allergies, claims 1) → no witness', async () => {
+    const allergies = ['Penicillin', 'Amoxicillin', 'Metformin'];
+    const req = baseReq({ allergies, drugIds: [PENICILLIN] });
+    const record = buildPatientRecord(poseidon, PATIENT, allergies);
+
+    const attack = { ...req, allergyCount: 1, ...renamePath(merklePathAt(record.tree, 1)) };
+
+    // Index 1 holds the Amoxicillin leaf; the zero-leaf proof cannot be built there.
+    await expect(service.prove(attack)).rejects.toThrow();
+  });
+
+  it('P2 attack: zero-leaf path pointing at a different index than allergyCount → no witness', async () => {
+    const allergies = ['Penicillin', 'Amoxicillin'];
+    const req = baseReq({ allergies, drugIds: [PENICILLIN] });
+    const record = buildPatientRecord(poseidon, PATIENT, allergies);
+
+    // Index 7 IS a genuine zero leaf, so (b) alone would pass. Claiming allergyCount = 0
+    // with that path is the (c) attack: it is caught by paddingPathBits === bits(count).
+    const attack = { ...req, allergyCount: 0, ...renamePath(merklePathAt(record.tree, 7)) };
+
+    await expect(service.prove(attack)).rejects.toThrow();
+  });
+
+  it('P2: a patient with no allergies still passes (count 0, zero leaf at index 0) → PASS', async () => {
+    const r = await service.prove(baseReq({ allergies: [], drugIds: [PENICILLIN] }));
+    expect(r.outcome).toBe(true);
+  });
+
+  it('P2: more allergies than N_max fails loudly instead of truncating', async () => {
+    const allergies = ['Penicillin', 'Amoxicillin', 'Metformin', 'Penicillin', 'Amoxicillin', 'Metformin'];
+    await expect(service.prove(baseReq({ allergies, drugIds: [PENICILLIN] }))).rejects.toThrow(/N_max=5/);
   });
 
   // ── P3 DosageOk ───────────────────────────────────────────────────────────────

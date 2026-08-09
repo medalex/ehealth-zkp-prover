@@ -35,11 +35,15 @@ export class ProveRequestDto {
   // refLeaf[i]      = Poseidon(recordId, recordType, substanceId, ...) — leaf hash
   // refSiblings[i]  = MERKLE_DEPTH sibling hashes for slot i
   // refPathBits[i]  = MERKLE_DEPTH path bits for slot i (0=left, 1=right)
-  // refIsActive[i]  = 1 for an active slot, 0 for padding
+  // Slot activation is NOT supplied: the circuit derives refIsActive[i] = (i < allergyCount)
+  // and proves the zero leaf is a member of patientRecordRoot at index allergyCount, with
+  // paddingPathBits pinned to the little-endian bits of that index.
   refLeaf: string[];
   refSiblings: string[][];
   refPathBits: number[][];
-  refIsActive: number[];
+  allergyCount: number;
+  paddingSiblings: string[];      // MERKLE_DEPTH
+  paddingPathBits: number[];      // MERKLE_DEPTH
 
   // N_LAB lab-based clinical policy slots (P3 lab clause — eGFR etc.)
   // labValue[L]         = patient measurement (PRIVATE, trusted prover)

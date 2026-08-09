@@ -93,6 +93,12 @@ interface HighLevelRequest {
   refSiblings?: string[][];
   refPathBits?: number[][];
   refIsActive?: number[];
+  // Allergy-count commitment from the MFSSIA patient-record proof: the circuit derives
+  // slot activation from allergyCount and proves the zero leaf sits at that index, so the
+  // prover no longer gets to say which allergy slots count.
+  allergyCount?: number;
+  paddingSiblings?: string[];
+  paddingPathBits?: number[];
   // MFSSIA contraindication-closure proof: root + per-active-slot membership for
   // (substanceId, prescribedDrug) → value. Aligned with substances order.
   contraindicationRoot?: string;
@@ -208,14 +214,28 @@ export class ProverService implements OnModuleInit {
     // Patient allergy record: root + Merkle proof come from the MFSSIA patient-record
     // registry (built from DKG allergies, leaf bound to patientId). Required — MFSSIA is
     // the authoritative source; the prover does not fabricate the patient record locally.
-    if (!req.patientRecordRoot || !req.refLeaf || !req.refSiblings || !req.refPathBits || !req.refIsActive) {
-      throw new Error('patientRecordRoot, refLeaf, refSiblings, refPathBits and refIsActive are required — fetch them from the MFSSIA patient-record registry');
+    if (!req.patientRecordRoot || !req.refLeaf || !req.refSiblings || !req.refPathBits) {
+      throw new Error('patientRecordRoot, refLeaf, refSiblings and refPathBits are required — fetch them from the MFSSIA patient-record registry');
+    }
+    if (req.allergyCount === undefined || !req.paddingSiblings || !req.paddingPathBits) {
+      throw new Error('allergyCount, paddingSiblings and paddingPathBits are required — fetch them from the MFSSIA patient-record registry (the circuit derives slot activation from the committed allergy count)');
+    }
+    // Truncating here is exactly the attack the count commitment closes: the dropped
+    // allergies would simply not be checked, and the proof would still verify.
+    if (allergies.length > N_max) {
+      throw new Error(
+        `patient has ${allergies.length} allergies but the circuit has only N_max=${N_max} slots — ` +
+        `truncating would silently skip the rest, so no proof is generated. Recompile the circuit ` +
+        `with a larger N_max and redo the trusted setup.`,
+      );
     }
     const patientRecordRoot = req.patientRecordRoot;
     const refLeaf = req.refLeaf;
     const refSiblings = req.refSiblings;
     const refPathBitsArr = req.refPathBits;
-    const refIsActive = req.refIsActive;
+    const allergyCount = req.allergyCount;
+    const paddingSiblings = req.paddingSiblings;
+    const paddingPathBits = req.paddingPathBits;
 
     // Committed contraindication: substanceId is bound to refLeaf, and the conflict value
     // comes from the MFSSIA contraindication closure (required — not fabricated locally).
@@ -237,7 +257,8 @@ export class ProverService implements OnModuleInit {
         contraSiblings.push(cp.siblings);
         contraPathBits.push(cp.pathBits);
       } else {
-        // Inactive slot: refIsActive=0 leaves these unconstrained.
+        // Padding slot (index >= allergyCount): the circuit derives refIsActive = 0 there,
+        // which leaves these unconstrained.
         substanceId.push('0');
         contraValue.push('0');
         contraSiblings.push(new Array(CONTRA_DEPTH).fill('0'));
@@ -369,7 +390,10 @@ export class ProverService implements OnModuleInit {
       refLeaf,
       refSiblings,
       refPathBits: refPathBitsArr.map(row => row.map(String)),
-      refIsActive: refIsActive.map(String),
+      // refIsActive is DERIVED in-circuit from allergyCount — deliberately not supplied.
+      allergyCount: String(allergyCount),
+      paddingSiblings,
+      paddingPathBits: paddingPathBits.map(String),
       labValue,
       labIsActive,
       labThreshold,
@@ -407,7 +431,9 @@ export class ProverService implements OnModuleInit {
       refLeaf: dto.refLeaf,
       refSiblings: dto.refSiblings.map(row => row.map(String)),
       refPathBits: dto.refPathBits.map(row => row.map(String)),
-      refIsActive: dto.refIsActive.map(String),
+      allergyCount: String(dto.allergyCount),
+      paddingSiblings: dto.paddingSiblings,
+      paddingPathBits: dto.paddingPathBits.map(String),
       labValue: dto.labValue,
       labIsActive: dto.labIsActive.map(String),
       labThreshold: dto.labThreshold,
