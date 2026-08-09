@@ -164,10 +164,15 @@ export class ProverService implements OnModuleInit {
       (p) => LAB_METRICS.has(norm(p.clinicalCondition)) && (DRUG_ID[norm(p.medicationCode)] ?? 0) !== 0,
     );
 
+    // Tie-break down to the full policy identity: two-sided ranges on one metric (eGFR >= 30
+    // AND eGFR <= 120) are routine clinically, and they tie on drug + metric. A tie leaves
+    // the order to the caller's input, which is exactly what canonical ordering must remove.
     labPolicies.sort(
       (a, b) =>
         norm(a.medicationCode).localeCompare(norm(b.medicationCode)) ||
-        norm(a.clinicalCondition).localeCompare(norm(b.clinicalCondition)),
+        norm(a.clinicalCondition).localeCompare(norm(b.clinicalCondition)) ||
+        norm(a.comparisonOperator).localeCompare(norm(b.comparisonOperator)) ||
+        Number(a.threshold) - Number(b.threshold),
     );
 
     if (labPolicies.length > N_LAB) {

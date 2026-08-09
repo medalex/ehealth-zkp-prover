@@ -407,6 +407,23 @@ describe('ProverService — policy enforcement (real Groth16 proofs)', () => {
     expect(a.outcome).toBe(true);
   });
 
+  it('P3 (lab): a two-sided range on one metric orders canonically either way round', async () => {
+    const common = {
+      drugIds: [METFORMIN],
+      prescriptionIssuedAt: 1750000000,
+      labResults: [labResult(45, '2026-06-25T14:00:00Z')],
+    };
+    const lower = egfrPolicy('>=', 30);   // ties with `upper` on drug + metric
+    const upper = egfrPolicy('<=', 120);
+
+    const a = await service.prove(baseReq({ ...common, policies: [lower, upper] }));
+    const b = await service.prove(baseReq({ ...common, policies: [upper, lower] }));
+
+    expect(labVector(a.publicSignals)).toEqual(labVector(b.publicSignals));
+    expect(a.publicSignals).toEqual(b.publicSignals);
+    expect(a.outcome).toBe(true);
+  });
+
   it('P3 (lab): a blocking policy listed last still occupies a slot and blocks → FAIL', async () => {
     const r = await service.prove(
       baseReq({
