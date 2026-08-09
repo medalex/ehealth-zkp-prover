@@ -66,6 +66,14 @@ const labResult = (value: number, measuredAt: string, metric = 'eGFR') => ({
   measuredAt,
 });
 
+// A lab policy on an arbitrary drug/metric pair — for the completeness tests below.
+const labPolicy = (medicationCode: string, clinicalCondition: string, op: string, threshold: number) => ({
+  medicationCode,
+  clinicalCondition,
+  comparisonOperator: op,
+  threshold,
+});
+
 // Same substance → id mapping as the prover and the MFSSIA patient-record registry.
 const SUBSTANCE_IDX: Record<string, number> = { metformin: 0, penicillin: 1, amoxicillin: 2 };
 
@@ -351,6 +359,66 @@ describe('ProverService — policy enforcement (real Groth16 proofs)', () => {
       }),
     );
     expect(r.outcome).toBe(true);
+  });
+
+  // ── P3 lab clause: completeness of the committed policy vector ───────────────
+  // The circuit enforces "a policy occupying a slot and targeting the prescribed drug must
+  // be satisfied", but it cannot see a policy that was never placed in a slot. The prover
+  // therefore commits the COMPLETE governed lab-policy set in canonical order; dropping or
+  // reordering one is not a way to obtain outcome = 1.
+
+  // The lab-policy part of the public input vector, in publicSignals order.
+  const labVector = (publicSignals: string[]) => [
+    ...PUB.labThreshold.map((i) => publicSignals[i]),
+    ...PUB.labRequiredOp.map((i) => publicSignals[i]),
+    ...PUB.labAppliesToDrug.map((i) => publicSignals[i]),
+    ...PUB.labMetricIdPub.map((i) => publicSignals[i]),
+  ];
+
+  it('P3 (lab): more governed lab policies than N_LAB slots is an error, not a silent drop', async () => {
+    await expect(
+      service.prove(
+        baseReq({
+          drugIds: [METFORMIN],
+          policies: [
+            labPolicy('penicillin', 'creatinine', '<=', 2),
+            labPolicy('amoxicillin', 'alt', '<=', 40),
+            egfrPolicy('>=', 30), // third governed lab policy — one slot too many
+          ],
+          labResults: [labResult(45, '2026-06-25T14:00:00Z')],
+        }),
+      ),
+    ).rejects.toThrow(/N_LAB=2/);
+  });
+
+  it('P3 (lab): reordering the input policies yields an identical public vector', async () => {
+    const common = {
+      drugIds: [METFORMIN],
+      prescriptionIssuedAt: 1750000000, // pin issuanceTime so the vectors are comparable
+      labResults: [labResult(45, '2026-06-25T14:00:00Z')],
+    };
+    const creatinine = labPolicy('penicillin', 'creatinine', '<=', 2);
+
+    const a = await service.prove(baseReq({ ...common, policies: [egfrPolicy('>=', 30), creatinine] }));
+    const b = await service.prove(baseReq({ ...common, policies: [creatinine, egfrPolicy('>=', 30)] }));
+
+    expect(labVector(a.publicSignals)).toEqual(labVector(b.publicSignals));
+    expect(a.publicSignals).toEqual(b.publicSignals);
+    expect(a.outcome).toBe(true);
+  });
+
+  it('P3 (lab): a blocking policy listed last still occupies a slot and blocks → FAIL', async () => {
+    const r = await service.prove(
+      baseReq({
+        drugIds: [METFORMIN],
+        policies: [
+          labPolicy('penicillin', 'creatinine', '<=', 2), // harmless, targets another drug
+          egfrPolicy('>=', 30),                           // blocking, listed last
+        ],
+        labResults: [labResult(20, '2026-06-25T14:00:00Z')],
+      }),
+    );
+    expect(r.outcome).toBe(false);
   });
 
   // ── Cryptographic soundness & binding: real Groth16 verify ───────────────────

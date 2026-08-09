@@ -11,6 +11,7 @@ const N_max = 5;   // reference slot count; n_total ≈ n_cred + N_max·n_Merkle
 const N_PRESC = 1;
 const MERKLE_DEPTH = 3;
 const CONTRA_DEPTH = 4;   // contraindication-closure tree depth (matches the circuit)
+const LAB_DEPTH = 3;      // per-patient lab-record tree depth (matches the circuit)
 const N_LAB = 2;   // max lab-based clinical policy slots
 
 // medicationCode → drugId (must align with policyDrugIds)
@@ -143,6 +144,43 @@ export class ProverService implements OnModuleInit {
     return m ? m[0] : '0';
   }
 
+  // The governed lab-policy set that goes into the public inputs.
+  //
+  // This vector is COMPLETE and CANONICALLY ORDERED, never a per-request selection. The
+  // circuit can only enforce "a policy occupying a slot and targeting the prescribed drug
+  // must be satisfied" — it cannot see a policy that was never placed in a slot. Dropping
+  // a blocking policy (past a slot limit, or by ordering the request adversarially) would
+  // therefore yield outcome = 1: the same opt-out the labIsActive fix closed, one level up.
+  //
+  // The defence is off-circuit and lives here: the verifier compares
+  // (labThreshold, labRequiredOp, labAppliesToDrug, labMetricIdPub) as a WHOLE against the
+  // DKG-committed policy set, and a fixed canonical order (medicationCode, then
+  // clinicalCondition) makes that comparison exact. An omitted or reordered policy changes
+  // the public vector and is rejected by the verifier. Overflow is a hard error, never a
+  // silent truncation.
+  private selectLabPolicies(policies: HighLevelRequest['policies']): HighLevelRequest['policies'] {
+    const norm = (s?: string) => (s ?? '').toLowerCase().trim();
+    const labPolicies = (policies ?? []).filter(
+      (p) => LAB_METRICS.has(norm(p.clinicalCondition)) && (DRUG_ID[norm(p.medicationCode)] ?? 0) !== 0,
+    );
+
+    labPolicies.sort(
+      (a, b) =>
+        norm(a.medicationCode).localeCompare(norm(b.medicationCode)) ||
+        norm(a.clinicalCondition).localeCompare(norm(b.clinicalCondition)),
+    );
+
+    if (labPolicies.length > N_LAB) {
+      throw new Error(
+        `${labPolicies.length} governed lab policies supplied but the circuit has only N_LAB=${N_LAB} ` +
+        `lab-policy slots. Truncating would silently drop a policy the verifier expects in the public ` +
+        `vector (and could drop a blocking one), so no proof is generated — recompile the circuit with ` +
+        `a larger N_LAB and redo the trusted setup.`,
+      );
+    }
+    return labPolicies;
+  }
+
   // Transforms high-level hospital-api request into circuit-level inputs
   private buildHighLevelInput(req: HighLevelRequest, nonce: string): Record<string, unknown> {
     const allergies = req.allergies ?? [];
@@ -239,17 +277,16 @@ export class ProverService implements OnModuleInit {
     // PUBLIC: the metric each policy governs, derived from the POLICY (clinicalCondition),
     // never from the measurement — otherwise labMetricId === labMetricIdPub is vacuous.
     const labMetricIdPub = new Array(N_LAB).fill('0');
-    const labRecordSiblings: string[][] = new Array(N_LAB).fill(null).map(() => new Array(MERKLE_DEPTH).fill('0'));
-    const labRecordPathBits: number[][] = new Array(N_LAB).fill(null).map(() => new Array(MERKLE_DEPTH).fill(0));
+    const labRecordSiblings: string[][] = new Array(N_LAB).fill(null).map(() => new Array(LAB_DEPTH).fill('0'));
+    const labRecordPathBits: number[][] = new Array(N_LAB).fill(null).map(() => new Array(LAB_DEPTH).fill(0));
 
     const prescribedDrugId = (req.drugIds ?? [])[0];
     let labSlot = 0;
-    for (const p of req.policies ?? []) {
+    // Complete governed set in canonical order — see selectLabPolicies. Nothing is skipped
+    // or truncated here, so slot L always holds the L-th policy of that committed vector.
+    for (const p of this.selectLabPolicies(req.policies)) {
       const metric = (p.clinicalCondition ?? '').toLowerCase().trim();
-      if (!LAB_METRICS.has(metric)) continue;
-      if (labSlot >= N_LAB) break;
       const drugId = DRUG_ID[(p.medicationCode ?? '').toLowerCase()] ?? 0;
-      if (!drugId) continue;
       const op = OP_CODE[(p.comparisonOperator ?? '').toLowerCase().trim()] ?? 0;
       // Public policy parameters — committed regardless of whether the slot is active.
       labThreshold[labSlot]     = String(Math.floor(Number(p.threshold)));
