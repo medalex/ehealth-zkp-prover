@@ -185,18 +185,30 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH, N
     signal input labIsActive[N_LAB];
     // Lab-record membership: each active measurement is bound to the patient's DKG lab
     // record — leaf = Poseidon(patientField, labMetricId[L], labValue[L]) ∈ labRecordRoot.
+    // labMetricId is private but no longer free: it is pinned to the PUBLIC labMetricIdPub[L]
+    // (see below), so the metric a slot proves membership for is the metric the public
+    // policy parameters were written for.
     signal input labMetricId[N_LAB];
     signal input labRecordSiblings[N_LAB][LAB_DEPTH];
     signal input labRecordPathBits[N_LAB][LAB_DEPTH];
 
     // N_max patient record reference slots (allergies etc.)
-    // refLeaf[i]     = Poseidon(recordId, recordType, substanceId, ...)
-    // refIsActive[i] = 1 for an active slot, 0 for padding
-    // Inactive slots pass all checks tautologically.
+    // refLeaf[i] = Poseidon(patientField, substanceId[i] + 1)
+    //
+    // refIsActive is NOT an input: it is derived from allergyCount below. As a free input it
+    // made Policy 2 opt-in — refIsActive = [0,...,0] satisfied every slot constraint
+    // tautologically and produced policy2 = 1 whatever the committed allergy tree held.
     signal input refLeaf[N_max];
     signal input refSiblings[N_max][MERKLE_DEPTH];
     signal input refPathBits[N_max][MERKLE_DEPTH];
-    signal input refIsActive[N_max];
+
+    // How many allergy leaves the patient record holds. The tree stores allergies
+    // contiguously at indices 0..allergyCount-1 with the zero leaf from allergyCount on, so
+    // a membership proof of the LITERAL ZERO leaf at index allergyCount proves "there is no
+    // allergy at or above this index" — the count itself becomes a committed fact.
+    signal input allergyCount;
+    signal input paddingSiblings[MERKLE_DEPTH];
+    signal input paddingPathBits[MERKLE_DEPTH];
 
     // Committed contraindication: substanceId is bound to refLeaf, and the contraindication
     // value comes from the governance closure (MFSSIA → DKG).
@@ -226,9 +238,14 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH, N
     // labThreshold[L]     — clinical threshold value (e.g. 30 for eGFR)
     // labRequiredOp[L]    — required (safe) condition: 0=GTE, 1=LTE, 2=EQ, 3=NEQ
     // labAppliesToDrug[L] — drugId the policy targets (0 for padding slots)
+    // labMetricIdPub[L]   — metric the policy governs, stringToField(clinicalCondition)
+    //                       (0 for padding slots). Binds the private labMetricId[L] used in
+    //                       the lab-record leaf to the metric of this public policy, so a
+    //                       prover cannot satisfy "eGFR >= 30" with a haemoglobin record.
     signal input labThreshold[N_LAB];
     signal input labRequiredOp[N_LAB];
     signal input labAppliesToDrug[N_LAB];
+    signal input labMetricIdPub[N_LAB];
 
     // ── Outputs ─────────────────────────────────────────────────────────────────
     signal output outcome;
@@ -246,15 +263,51 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH, N
     }
     policy1 <== credProof.valid;
 
+    // ── Allergy-count commitment ────────────────────────────────────────────────
+    // (a) refIsActive[i] = (i < allergyCount), derived — never supplied.
+    // (b) the zero leaf is proved to be a member of patientRecordRoot at index allergyCount.
+    // (c) that proof's path is pinned to the index by Num2Bits(allergyCount).
+    //
+    // (c) is what makes (b) mean anything: without it a prover holding 5 allergies could
+    // prove the zero leaf at index 7 — which is genuinely in the tree — while claiming
+    // allergyCount = 2, and skip three allergies.
+    signal refIsActive[N_max];
+
+    // 3 bits pin allergyCount to [0,7]; the tree is 2^MERKLE_DEPTH = 8 leaves wide.
+    component countBits = Num2Bits(MERKLE_DEPTH);
+    countBits.in <== allergyCount;
+
+    // ...and no more than the N_max slots the circuit actually checks.
+    component countInRange = LessEqThan(8);
+    countInRange.a <== allergyCount;
+    countInRange.b <== N_max;
+    countInRange.out === 1;
+
+    // (b) zero leaf ∈ patientRecordRoot at index allergyCount.
+    component paddingProof = PoseidonMerkleProof(MERKLE_DEPTH);
+    paddingProof.leaf         <== 0;
+    paddingProof.expectedRoot <== patientRecordRoot;
+    for (var pd = 0; pd < MERKLE_DEPTH; pd++) {
+        paddingProof.siblings[pd] <== paddingSiblings[pd];
+        paddingProof.pathBits[pd] <== paddingPathBits[pd];
+        // (c) the path IS the index — little-endian, matching the sibling walk order.
+        paddingPathBits[pd] === countBits.out[pd];
+    }
+    paddingProof.valid === 1;
+
+    // (a) slot i is active exactly when i < allergyCount.
+    component slotBelowCount[N_max];
+
+
     // ── Merkle proofs + committed contraindication for N_max reference slots ──────
-    // Each active allergy slot (refIsActive=1) must:
+    // Each active allergy slot (i < allergyCount) must:
     //   (1) be a valid member of patientRecordRoot (the patient's DKG allergy record);
     //   (2) bind substanceId to that leaf: refLeaf = Poseidon(patientField, substanceId+1);
     //   (3) carry a contraindication value from the committed closure:
     //       Poseidon(substanceId, prescribedDrug, contraValue) ∈ contraindicationRoot.
-    // The prover cannot fake the contraindication — only the committed value's leaf exists.
+    // The prover cannot fake the contraindication — only the committed value's leaf exists,
+    // and it can no longer skip a slot: activation is a function of the committed count.
     component refProof[N_max];
-    component refActiveBool[N_max];
     signal activeAndValid[N_max];
 
     component substLeaf[N_max];
@@ -267,8 +320,12 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH, N
     signal noConflictRow[N_max];
 
     for (var i = 0; i < N_max; i++) {
-        refActiveBool[i] = ForceBool();
-        refActiveBool[i].in <== refIsActive[i];
+        // Derived activation. LessThan's output is boolean by construction, so no ForceBool.
+        // 8 bits is ample: i <= N_max-1 and allergyCount <= N_max, both pinned above.
+        slotBelowCount[i] = LessThan(8);
+        slotBelowCount[i].a <== i;
+        slotBelowCount[i].b <== allergyCount;
+        refIsActive[i] <== slotBelowCount[i].out;
 
         // (1) Patient-record membership.
         refProof[i] = PoseidonMerkleProof(MERKLE_DEPTH);
@@ -390,6 +447,20 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH, N
         labActiveBool[L] = ForceBool();
         labActiveBool[L].in <== labIsActive[L];
 
+        // does this policy target the prescribed drug? (N_PRESC=1)
+        labApplies[L] = IsEqual();
+        labApplies[L].a <== labAppliesToDrug[L];
+        labApplies[L].b <== prescribedDrugIds[0];
+
+        // Slot activation is NOT prover-controlled: a slot is active exactly when its
+        // public policy targets the prescribed drug. Without this the prover could set
+        // labIsActive = 0 and make labRecActiveValid (and the whole slot) vanish.
+        labIsActive[L] === labApplies[L].out;
+
+        // The metric proved by the membership leaf is pinned to the public policy metric,
+        // so the slot cannot be satisfied with an unrelated (but genuine) lab record.
+        labMetricId[L] === labMetricIdPub[L];
+
         // Lab-record membership: an active measurement must belong to the patient's
         // DKG lab record — leaf = Poseidon(patientField, labMetricId, labValue).
         labLeaf[L] = Poseidon(3);
@@ -432,11 +503,6 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH, N
         veq2[L] <== isOp2[L].out * (1 - labEq[L].out);
         veq3[L] <== isOp3[L].out * labEq[L].out;
         labViol[L] <== vlt[L] + vgt[L] + veq2[L] + veq3[L];
-
-        // does this policy target the prescribed drug? (N_PRESC=1)
-        labApplies[L] = IsEqual();
-        labApplies[L].a <== labAppliesToDrug[L];
-        labApplies[L].b <== prescribedDrugIds[0];
 
         // block = active AND violated AND applies
         labT1[L]      <== labIsActive[L] * labViol[L];
@@ -484,7 +550,10 @@ template PrescriptionValidation(N_DRUGS, N_max, N_PRESC, BITLEN, MERKLE_DEPTH, N
 // now <= issuanceTime + validFor is done off-circuit by the pharmacy.
 // contraindicationRoot binds P2 to the governance contraindication closure in DKG;
 // labRecordRoot binds the P3 lab-clause values to the patient's DKG lab record.
-// nPublic = 2 outputs + 19 public inputs = 21.
+// labMetricIdPub binds each lab slot to the metric its public policy governs; together with
+// labIsActive === labApplies[L].out it removes the two prover-controlled escapes from P3's
+// lab clause (silently deactivating a slot, or answering it with a different metric).
+// nPublic = 2 outputs + 21 public inputs = 23.
 component main {public [
     validCredentialRoot,
     patientRecordRoot,
@@ -496,6 +565,7 @@ component main {public [
     labThreshold,
     labRequiredOp,
     labAppliesToDrug,
+    labMetricIdPub,
     contraindicationRoot,
     labRecordRoot
 ]} = PrescriptionValidation(3, 5, 1, 32, 3, 2, 4, 3);

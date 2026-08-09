@@ -11,6 +11,7 @@ const N_max = 5;   // reference slot count; n_total ≈ n_cred + N_max·n_Merkle
 const N_PRESC = 1;
 const MERKLE_DEPTH = 3;
 const CONTRA_DEPTH = 4;   // contraindication-closure tree depth (matches the circuit)
+const LAB_DEPTH = 3;      // per-patient lab-record tree depth (matches the circuit)
 const N_LAB = 2;   // max lab-based clinical policy slots
 
 // medicationCode → drugId (must align with policyDrugIds)
@@ -49,7 +50,8 @@ const SUBSTANCE_IDX: Record<string, number> = {
 // outcome(0), stmtHash(1), issuanceTime(2), validFor(3),
 // validCredentialRoot(4), patientRecordRoot(5), nonce(6),
 // policyDrugIds[3] → 7-9, maxDosages[3] → 10-12, contraindicationRoot → 13,
-// labRecordRoot → 14, labThreshold[2] → 15-16, labRequiredOp[2] → 17-18, labAppliesToDrug[2] → 19-20
+// labRecordRoot → 14, labThreshold[2] → 15-16, labRequiredOp[2] → 17-18, labAppliesToDrug[2] → 19-20,
+// labMetricIdPub[2] → 21-22
 // doctorCredentialHash, substanceId, contraValue and labValue are PRIVATE — not in publicSignals
 export const PUB = {
   outcome: 0,
@@ -66,6 +68,7 @@ export const PUB = {
   labThreshold: [15, 16],
   labRequiredOp: [17, 18],
   labAppliesToDrug: [19, 20],
+  labMetricIdPub: [21, 22],
 } as const;
 
 // High-level request from hospital-api (ASP.NET Core serializes to camelCase)
@@ -90,6 +93,12 @@ interface HighLevelRequest {
   refSiblings?: string[][];
   refPathBits?: number[][];
   refIsActive?: number[];
+  // Allergy-count commitment from the MFSSIA patient-record proof: the circuit derives
+  // slot activation from allergyCount and proves the zero leaf sits at that index, so the
+  // prover no longer gets to say which allergy slots count.
+  allergyCount?: number;
+  paddingSiblings?: string[];
+  paddingPathBits?: number[];
   // MFSSIA contraindication-closure proof: root + per-active-slot membership for
   // (substanceId, prescribedDrug) → value. Aligned with substances order.
   contraindicationRoot?: string;
@@ -141,6 +150,48 @@ export class ProverService implements OnModuleInit {
     return m ? m[0] : '0';
   }
 
+  // The governed lab-policy set that goes into the public inputs.
+  //
+  // This vector is COMPLETE and CANONICALLY ORDERED, never a per-request selection. The
+  // circuit can only enforce "a policy occupying a slot and targeting the prescribed drug
+  // must be satisfied" — it cannot see a policy that was never placed in a slot. Dropping
+  // a blocking policy (past a slot limit, or by ordering the request adversarially) would
+  // therefore yield outcome = 1: the same opt-out the labIsActive fix closed, one level up.
+  //
+  // The defence is off-circuit and lives here: the verifier compares
+  // (labThreshold, labRequiredOp, labAppliesToDrug, labMetricIdPub) as a WHOLE against the
+  // DKG-committed policy set, and a fixed canonical order (medicationCode, then
+  // clinicalCondition) makes that comparison exact. An omitted or reordered policy changes
+  // the public vector and is rejected by the verifier. Overflow is a hard error, never a
+  // silent truncation.
+  private selectLabPolicies(policies: HighLevelRequest['policies']): HighLevelRequest['policies'] {
+    const norm = (s?: string) => (s ?? '').toLowerCase().trim();
+    const labPolicies = (policies ?? []).filter(
+      (p) => LAB_METRICS.has(norm(p.clinicalCondition)) && (DRUG_ID[norm(p.medicationCode)] ?? 0) !== 0,
+    );
+
+    // Tie-break down to the full policy identity: two-sided ranges on one metric (eGFR >= 30
+    // AND eGFR <= 120) are routine clinically, and they tie on drug + metric. A tie leaves
+    // the order to the caller's input, which is exactly what canonical ordering must remove.
+    labPolicies.sort(
+      (a, b) =>
+        norm(a.medicationCode).localeCompare(norm(b.medicationCode)) ||
+        norm(a.clinicalCondition).localeCompare(norm(b.clinicalCondition)) ||
+        norm(a.comparisonOperator).localeCompare(norm(b.comparisonOperator)) ||
+        Number(a.threshold) - Number(b.threshold),
+    );
+
+    if (labPolicies.length > N_LAB) {
+      throw new Error(
+        `${labPolicies.length} governed lab policies supplied but the circuit has only N_LAB=${N_LAB} ` +
+        `lab-policy slots. Truncating would silently drop a policy the verifier expects in the public ` +
+        `vector (and could drop a blocking one), so no proof is generated — recompile the circuit with ` +
+        `a larger N_LAB and redo the trusted setup.`,
+      );
+    }
+    return labPolicies;
+  }
+
   // Transforms high-level hospital-api request into circuit-level inputs
   private buildHighLevelInput(req: HighLevelRequest, nonce: string): Record<string, unknown> {
     const allergies = req.allergies ?? [];
@@ -163,14 +214,28 @@ export class ProverService implements OnModuleInit {
     // Patient allergy record: root + Merkle proof come from the MFSSIA patient-record
     // registry (built from DKG allergies, leaf bound to patientId). Required — MFSSIA is
     // the authoritative source; the prover does not fabricate the patient record locally.
-    if (!req.patientRecordRoot || !req.refLeaf || !req.refSiblings || !req.refPathBits || !req.refIsActive) {
-      throw new Error('patientRecordRoot, refLeaf, refSiblings, refPathBits and refIsActive are required — fetch them from the MFSSIA patient-record registry');
+    if (!req.patientRecordRoot || !req.refLeaf || !req.refSiblings || !req.refPathBits) {
+      throw new Error('patientRecordRoot, refLeaf, refSiblings and refPathBits are required — fetch them from the MFSSIA patient-record registry');
+    }
+    if (req.allergyCount === undefined || !req.paddingSiblings || !req.paddingPathBits) {
+      throw new Error('allergyCount, paddingSiblings and paddingPathBits are required — fetch them from the MFSSIA patient-record registry (the circuit derives slot activation from the committed allergy count)');
+    }
+    // Truncating here is exactly the attack the count commitment closes: the dropped
+    // allergies would simply not be checked, and the proof would still verify.
+    if (allergies.length > N_max) {
+      throw new Error(
+        `patient has ${allergies.length} allergies but the circuit has only N_max=${N_max} slots — ` +
+        `truncating would silently skip the rest, so no proof is generated. Recompile the circuit ` +
+        `with a larger N_max and redo the trusted setup.`,
+      );
     }
     const patientRecordRoot = req.patientRecordRoot;
     const refLeaf = req.refLeaf;
     const refSiblings = req.refSiblings;
     const refPathBitsArr = req.refPathBits;
-    const refIsActive = req.refIsActive;
+    const allergyCount = req.allergyCount;
+    const paddingSiblings = req.paddingSiblings;
+    const paddingPathBits = req.paddingPathBits;
 
     // Committed contraindication: substanceId is bound to refLeaf, and the conflict value
     // comes from the MFSSIA contraindication closure (required — not fabricated locally).
@@ -192,7 +257,8 @@ export class ProverService implements OnModuleInit {
         contraSiblings.push(cp.siblings);
         contraPathBits.push(cp.pathBits);
       } else {
-        // Inactive slot: refIsActive=0 leaves these unconstrained.
+        // Padding slot (index >= allergyCount): the circuit derives refIsActive = 0 there,
+        // which leaves these unconstrained.
         substanceId.push('0');
         contraValue.push('0');
         contraSiblings.push(new Array(CONTRA_DEPTH).fill('0'));
@@ -219,8 +285,10 @@ export class ProverService implements OnModuleInit {
     }
 
     // Lab-based clinical policies (P3 lab clause) — eGFR etc.
-    // A slot is activated only when the patient has a matching lab measurement;
-    // missing measurement → slot inactive → no block (cannot evaluate).
+    // Slot activation is fixed by the circuit: labIsActive[L] === (labAppliesToDrug[L] ==
+    // prescribedDrugIds[0]). A slot whose policy targets another drug MUST be inactive, and a
+    // slot whose policy targets the prescribed drug MUST be active and carry a lab-record
+    // membership proof — the prover can no longer opt out of a policy that applies.
     if (!req.labRecordRoot) {
       throw new Error('labRecordRoot is required — fetch it from the MFSSIA lab-record registry');
     }
@@ -232,31 +300,54 @@ export class ProverService implements OnModuleInit {
     const labValue = new Array(N_LAB).fill('0');
     const labIsActive = new Array(N_LAB).fill('0');
     const labMetricId = new Array(N_LAB).fill('0');
-    const labRecordSiblings: string[][] = new Array(N_LAB).fill(null).map(() => new Array(MERKLE_DEPTH).fill('0'));
-    const labRecordPathBits: number[][] = new Array(N_LAB).fill(null).map(() => new Array(MERKLE_DEPTH).fill(0));
+    // PUBLIC: the metric each policy governs, derived from the POLICY (clinicalCondition),
+    // never from the measurement — otherwise labMetricId === labMetricIdPub is vacuous.
+    const labMetricIdPub = new Array(N_LAB).fill('0');
+    const labRecordSiblings: string[][] = new Array(N_LAB).fill(null).map(() => new Array(LAB_DEPTH).fill('0'));
+    const labRecordPathBits: number[][] = new Array(N_LAB).fill(null).map(() => new Array(LAB_DEPTH).fill(0));
 
+    const prescribedDrugId = (req.drugIds ?? [])[0];
     let labSlot = 0;
-    for (const p of req.policies ?? []) {
+    // Complete governed set in canonical order — see selectLabPolicies. Nothing is skipped
+    // or truncated here, so slot L always holds the L-th policy of that committed vector.
+    for (const p of this.selectLabPolicies(req.policies)) {
       const metric = (p.clinicalCondition ?? '').toLowerCase().trim();
-      if (!LAB_METRICS.has(metric)) continue;
-      if (labSlot >= N_LAB) break;
       const drugId = DRUG_ID[(p.medicationCode ?? '').toLowerCase()] ?? 0;
-      if (!drugId) continue;
-      // Use the most recent measurement for this metric (a patient may have several)
-      const matches = labResults.filter(r => (r.metric ?? '').toLowerCase().trim() === metric);
-      if (!matches.length) continue;   // no measurement on file → cannot evaluate this policy
-      const lr = matches.sort((a, b) =>
-        new Date(b.measuredAt ?? 0).getTime() - new Date(a.measuredAt ?? 0).getTime())[0];
       const op = OP_CODE[(p.comparisonOperator ?? '').toLowerCase().trim()] ?? 0;
+      // Public policy parameters — committed regardless of whether the slot is active.
       labThreshold[labSlot]     = String(Math.floor(Number(p.threshold)));
       labRequiredOp[labSlot]    = String(op);
       labAppliesToDrug[labSlot] = String(drugId);
-      labValue[labSlot]         = String(Math.floor(Number(lr.value ?? 0)));
-      labIsActive[labSlot]      = '1';
-      // Lab-record membership for this measurement (from MFSSIA lab-record proof).
-      labMetricId[labSlot]      = String(lr.metricId ?? '0');
-      if (lr.siblings) labRecordSiblings[labSlot] = lr.siblings;
-      if (lr.pathBits) labRecordPathBits[labSlot] = lr.pathBits;
+      labMetricIdPub[labSlot]   = this.stringToField(metric).toString();
+      // Private metric id is pinned to the public one (circuit: labMetricId === labMetricIdPub);
+      // it is also what the MFSSIA lab-record leaf uses, so membership still verifies.
+      labMetricId[labSlot]      = labMetricIdPub[labSlot];
+
+      // Use the most recent measurement for this metric (a patient may have several)
+      const matches = labResults.filter(r => (r.metric ?? '').toLowerCase().trim() === metric);
+      const lr = matches.sort((a, b) =>
+        new Date(b.measuredAt ?? 0).getTime() - new Date(a.measuredAt ?? 0).getTime())[0];
+
+      if (drugId === prescribedDrugId) {
+        // Policy applies → the circuit forces labIsActive = 1, which requires a lab-record
+        // membership proof. Without a measurement no witness exists; fail loudly instead of
+        // silently dropping the policy (which the old `continue` did).
+        if (!lr) {
+          throw new Error(
+            `Lab policy "${p.clinicalCondition}" applies to the prescribed drug (${drugId}) but the ` +
+            `patient has no ${metric} measurement in the MFSSIA lab record — cannot build a witness ` +
+            `(the circuit requires an active, Merkle-proved measurement for every applicable lab policy).`,
+          );
+        }
+        labValue[labSlot]    = String(Math.floor(Number(lr.value ?? 0)));
+        labIsActive[labSlot] = '1';
+        if (lr.siblings) labRecordSiblings[labSlot] = lr.siblings;
+        if (lr.pathBits) labRecordPathBits[labSlot] = lr.pathBits;
+      } else {
+        // Policy targets a different drug → labApplies = 0, so the slot must stay inactive.
+        // labValue/siblings are then unconstrained; keep them at the zero padding.
+        labIsActive[labSlot] = '0';
+      }
       labSlot++;
     }
 
@@ -299,12 +390,16 @@ export class ProverService implements OnModuleInit {
       refLeaf,
       refSiblings,
       refPathBits: refPathBitsArr.map(row => row.map(String)),
-      refIsActive: refIsActive.map(String),
+      // refIsActive is DERIVED in-circuit from allergyCount — deliberately not supplied.
+      allergyCount: String(allergyCount),
+      paddingSiblings,
+      paddingPathBits: paddingPathBits.map(String),
       labValue,
       labIsActive,
       labThreshold,
       labRequiredOp,
       labAppliesToDrug,
+      labMetricIdPub,
       labRecordRoot,
       labMetricId,
       labRecordSiblings,
@@ -336,12 +431,15 @@ export class ProverService implements OnModuleInit {
       refLeaf: dto.refLeaf,
       refSiblings: dto.refSiblings.map(row => row.map(String)),
       refPathBits: dto.refPathBits.map(row => row.map(String)),
-      refIsActive: dto.refIsActive.map(String),
+      allergyCount: String(dto.allergyCount),
+      paddingSiblings: dto.paddingSiblings,
+      paddingPathBits: dto.paddingPathBits.map(String),
       labValue: dto.labValue,
       labIsActive: dto.labIsActive.map(String),
       labThreshold: dto.labThreshold,
       labRequiredOp: dto.labRequiredOp.map(String),
       labAppliesToDrug: dto.labAppliesToDrug,
+      labMetricIdPub: dto.labMetricIdPub,
       labRecordRoot: dto.labRecordRoot,
       labMetricId: dto.labMetricId,
       labRecordSiblings: dto.labRecordSiblings.map(row => row.map(String)),
