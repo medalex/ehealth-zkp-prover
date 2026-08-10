@@ -479,11 +479,22 @@ export class ProverService implements OnModuleInit {
     }
 
     const snarkjs = await import('snarkjs');
-    const { proof, publicSignals } = await snarkjs.groth16.fullProve(
-      input,
-      this.wasmPath,
-      this.zkeyPath,
-    );
+
+    // PROBE BUILD ONLY — not the production path. fullProve() does witness calculation and
+    // proving in one call, which cannot be split from outside; here the two are run
+    // separately so the latency decomposition can attribute them. The extra work versus
+    // fullProve is one temporary witness buffer; the instrumented and uninstrumented
+    // end-to-end totals are both reported so the distortion is visible.
+    const tW = process.hrtime.bigint();
+    const wtns = { type: 'mem' } as any;
+    await snarkjs.wtns.calculate(input, this.wasmPath, wtns);
+    const tP = process.hrtime.bigint();
+    const { proof, publicSignals } = await snarkjs.groth16.prove(this.zkeyPath, wtns);
+    const tE = process.hrtime.bigint();
+    const witnessMs = Number(tP - tW) / 1e6;
+    const proveMs = Number(tE - tP) / 1e6;
+    const wf = (dto as any)?.workflowId ?? '-';
+    console.log(`[timing] wf=${wf} witness=${witnessMs.toFixed(1)} prove=${proveMs.toFixed(1)} sum=${(witnessMs + proveMs).toFixed(1)}`);
 
     const outcome = parseInt(publicSignals[PUB.outcome]) === 1;
 
